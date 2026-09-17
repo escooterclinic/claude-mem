@@ -33,8 +33,8 @@ const { fetchServerObservations, toLocalObservationShape } =
 
 const serverRuntime = () => ({
   runtime: 'server',
-  projectId: 'patrykradek',
-  serverBaseUrl: 'http://192.168.108.122:37878',
+  projectId: 'demo-project',
+  serverBaseUrl: 'http://memory.example:37878',
   client: {
     contextObservations: async (i: Record<string, unknown>) => { contextCalls.push(i); return impl(i); },
   },
