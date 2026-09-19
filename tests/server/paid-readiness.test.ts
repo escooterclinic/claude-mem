@@ -24,7 +24,7 @@ import { DisabledServerQueueManager } from '../../src/server/runtime/types.js';
 import { requireRateLimit, requireMonthlyQuota } from '../../src/server/middleware/rate-limit.js';
 import { meterRequests } from '../../src/server/middleware/usage-metering.js';
 import { logger } from '../../src/utils/logger.js';
-import { quoteIdentifier, newApiKey } from '../sdk/pg-isolation.js';
+import { createIsolatedSchema, newApiKey, poolForSchema, quoteIdentifier } from '../sdk/pg-isolation.js';
 
 const testDatabaseUrl = process.env.CLAUDE_MEM_TEST_POSTGRES_URL;
 
@@ -61,13 +61,10 @@ describe('paid-readiness (usage metering, rate limit, quota)', () => {
     loggerSpies = ['info', 'warn', 'error', 'debug'].map((m) =>
       spyOn(logger, m as 'info').mockImplementation(() => {}),
     );
-    pool = new pg.Pool({ connectionString: testDatabaseUrl });
+    schemaName = await createIsolatedSchema(testDatabaseUrl, 'cm_paid');
+    pool = poolForSchema(testDatabaseUrl, schemaName);
     client = await pool.connect();
-    schemaName = `cm_paid_${randomUUID().replaceAll('-', '_')}`;
-    await client.query(`CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
-    await client.query(`SET search_path TO ${quoteIdentifier(schemaName)}`);
     await bootstrapServerPostgresSchema(client);
-    pool.on('connect', (c) => { c.query(`SET search_path TO ${quoteIdentifier(schemaName)}`).catch(() => {}); });
     storage = createPostgresStorageRepositories(client);
     const team = await storage.teams.create({ name: 'team' });
     const project = await storage.projects.create({ teamId: team.id, name: 'p' });

@@ -12,7 +12,7 @@ import {
 } from '../../../src/storage/postgres/index.js';
 import { DisabledServerQueueManager } from '../../../src/server/runtime/types.js';
 import { logger } from '../../../src/utils/logger.js';
-import { quoteIdentifier, newApiKey } from '../../sdk/pg-isolation.js';
+import { createIsolatedSchema, newApiKey, poolForSchema, quoteIdentifier } from '../../sdk/pg-isolation.js';
 
 const testDatabaseUrl = process.env.CLAUDE_MEM_TEST_POSTGRES_URL;
 
@@ -49,15 +49,10 @@ describe('Phase 11 — team/project queue listing endpoints', () => {
       spyOn(logger, 'error').mockImplementation(() => {}),
       spyOn(logger, 'debug').mockImplementation(() => {}),
     ];
-    pool = new pg.Pool({ connectionString: testDatabaseUrl });
+    schemaName = await createIsolatedSchema(testDatabaseUrl, 'cm_phase11_routes');
+    pool = poolForSchema(testDatabaseUrl, schemaName);
     client = await pool.connect();
-    schemaName = `cm_phase11_routes_${crypto.randomUUID().replaceAll('-', '_')}`;
-    await client.query(`CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
-    await client.query(`SET search_path TO ${quoteIdentifier(schemaName)}`);
     await bootstrapServerPostgresSchema(client);
-    pool.on('connect', (poolClient) => {
-      poolClient.query(`SET search_path TO ${quoteIdentifier(schemaName)}`).catch(() => {});
-    });
     storage = createPostgresStorageRepositories(client);
 
     const teamA = await storage.teams.create({ name: 'team-a' });
