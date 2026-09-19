@@ -121,7 +121,12 @@ describe('ServerService', () => {
         // No active queue manager: enqueue must report queued_only.
         expect(body.generationJob.transport).toBe('queued_only');
       } finally {
-        await pool.end();
+        // The pool has ONE owner. `ServerService.stop()` ends the pool it was
+        // handed (ServerService.ts:250), so stop the service first and only end
+        // the pool if it never got that far — otherwise the second end throws
+        // "Called end on pool more than once" and fails a passing assertion.
+        if (service) { await service.stop(); service = null; }
+        if (!pool.ended) await pool.end();
       }
     });
 
@@ -185,7 +190,12 @@ describe('ServerService', () => {
         );
         expect((result.rows[0] as { count: number }).count).toBe(0);
       } finally {
-        await pool.end();
+        // The pool has ONE owner. `ServerService.stop()` ends the pool it was
+        // handed (ServerService.ts:250), so stop the service first and only end
+        // the pool if it never got that far — otherwise the second end throws
+        // "Called end on pool more than once" and fails a passing assertion.
+        if (service) { await service.stop(); service = null; }
+        if (!pool.ended) await pool.end();
       }
     });
 
@@ -252,7 +262,12 @@ describe('ServerService', () => {
         );
         expect((eventCount.rows[0] as { count: number }).count).toBe(0);
       } finally {
-        await pool.end();
+        // The pool has ONE owner. `ServerService.stop()` ends the pool it was
+        // handed (ServerService.ts:250), so stop the service first and only end
+        // the pool if it never got that far — otherwise the second end throws
+        // "Called end on pool more than once" and fails a passing assertion.
+        if (service) { await service.stop(); service = null; }
+        if (!pool.ended) await pool.end();
       }
     });
   } else {
