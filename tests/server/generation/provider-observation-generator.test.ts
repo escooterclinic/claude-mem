@@ -131,6 +131,39 @@ describe('ProviderObservationGenerator', () => {
     expect(reloaded?.status).toBe('completed');
   });
 
+  // REGRESSION: a payload naming a generation_job row that does not exist used
+  // to return { status: 'completed', observationCount: 0 }. That reported
+  // SUCCESS to BullMQ while the dequeued row was never touched, so the row sat
+  // status=queued forever -- invisible to the failed-job leg (it never failed)
+  // and to the queue-depth leg (BullMQ waiting stayed 0). Measured 2026-09-19:
+  // 8 session_summary rows stranded 385-488h that way.
+  //
+  // Delete the `throw` in ProviderObservationGenerator and this test fails:
+  // process() resolves with status 'completed' instead of rejecting.
+  it('rejects, and does NOT report completed, when the payload names a job row that does not exist', async () => {
+    const provider = new StubProvider('<observation><type>discovery</type><title>OK</title><facts><fact>f</fact></facts></observation>');
+    const generator = new ProviderObservationGenerator({
+      pool,
+      provider,
+    } as unknown as { pool: pg.Pool; provider: ServerGenerationProvider });
+
+    const phantom = crypto.randomUUID();
+    const job = makeJob();
+    (job.data as { generation_job_id: string }).generation_job_id = phantom;
+
+    await expect(generator.process(job)).rejects.toThrow(new RegExp(phantom));
+    // the provider must never be reached for a row that does not exist
+    expect(provider.calls).toBe(0);
+
+    // and the real row must be left alone rather than silently marked done
+    const untouched = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(untouched?.status).toBe('queued');
+  });
+
   it('marks a job as failed (no retry) when provider returns malformed XML', async () => {
     const provider = new StubProvider('not xml at all');
     const generator = new ProviderObservationGenerator({

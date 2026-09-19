@@ -37,6 +37,32 @@ export class ServerGenerationScopeViolationError extends Error {
   }
 }
 
+// A payload naming a generation_job row that does not exist. NOTHING in this
+// application deletes from observation_generation_jobs -- there is no DELETE
+// against that table anywhere in src -- so "not found by id" is never the
+// normal disappearance of an old row. It means the payload carries an id that
+// was never this row's own, which `jobs/types.ts` already calls out as
+// "a programmer error caught at enqueue".
+//
+// MEASURED 2026-09-19 on the patrykradek corpus: 359 of 204,845 rows carrying a
+// generation_job_id had payload.generation_job_id != id, and 8 session_summary
+// rows had sat status=queued for 385-488 HOURS because of it. The branch below
+// used to `return { status: 'completed', observationCount: 0 }`, so BullMQ
+// recorded a SUCCESS, the dequeued row was never touched, and the strand was
+// invisible to every counter at once: it never fails, so the failed-job leg
+// filters it out, and BullMQ waiting stays 0, so the depth leg sees nothing.
+// Throwing puts it on the failed list where the existing detector can see it.
+export class ServerGenerationJobRowMissingError extends Error {
+  readonly generationJobId: string;
+  constructor(generationJobId: string) {
+    super(
+      `generation job row ${generationJobId} named by the payload does not exist; ` +
+        'this application never deletes those rows, so the payload id is wrong',
+    );
+    this.generationJobId = generationJobId;
+  }
+}
+
 // ProviderObservationGenerator is the BullMQ Worker processor for server-beta
 // observation generation. It does the following on every job invocation:
 //
@@ -175,11 +201,15 @@ export class ProviderObservationGenerator {
     // bug; either way we audit and refuse.
     const candidate = await this.loadCanonicalOutbox(payload.generation_job_id);
     if (!candidate) {
-      logger.info('SYSTEM', 'job row not found by id; nothing to do', {
+      // NOT `completed`. See ServerGenerationJobRowMissingError above: a
+      // missing row is corruption, not "nothing to do", and reporting success
+      // here is what stranded 8 summaries for up to 488h without one counter
+      // moving.
+      logger.error('SYSTEM', 'job row not found by id; payload names a row that does not exist', {
         correlationId,
         generationJobId: payload.generation_job_id,
       });
-      return { jobId: payload.generation_job_id, status: 'completed', observationCount: 0 };
+      throw new ServerGenerationJobRowMissingError(payload.generation_job_id);
     }
     if (candidate.teamId !== payload.team_id || candidate.projectId !== payload.project_id) {
       const violation = new ServerGenerationScopeViolationError(
