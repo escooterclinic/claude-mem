@@ -49,7 +49,15 @@ describe('OpenRouterObservationProvider max_tokens', () => {
         status: 'processing', idempotencyKey: 'k', bullmqJobId: null, attempts: 1,
         maxAttempts: 3, nextAttemptAtEpoch: null, lockedAtEpoch: null,
       },
-      events: [],
+      // ONE event, because an agent_event job always carries one. With an empty
+      // list the provider now (correctly) refuses to call out at all, so the
+      // fixture would assert the cap on a request that never happens.
+      events: [{
+        id: 'e', projectId: 'p', teamId: 't', serverSessionId: null, sourceAdapter: 'api',
+        sourceEventId: null, idempotencyKey: 'ik', eventType: 'tool_use', platformSource: null,
+        payload: { tool: 'bash' }, metadata: {},
+        occurredAtEpoch: 0, receivedAtEpoch: 0, createdAtEpoch: 0,
+      }],
       project: { projectId: 'p', teamId: 't' },
     } as never);
     return body.max_tokens as number;
