@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Application, Request, Response } from 'express';
+import { CONTEXT_LIMIT_MAX } from '../../../shared/context-limits.js';
 import type { Database } from 'bun:sqlite';
 import { z, type ZodTypeAny } from 'zod';
 import type { RouteHandler } from '../../../services/server/Server.js';
@@ -242,11 +243,23 @@ export class ServerV1Routes implements RouteHandler {
 
     app.post('/v1/context', readAuth, this.handleCreate(z.object({
       projectId: z.string().min(1),
-      query: z.string().min(1),
-      limit: z.number().int().positive().max(50).optional(),
+      // Optional: a context request with no query asks for the most RECENT
+      // items, which is what a session-start block actually wants.
+      query: z.string().min(1).optional(),
+      limit: z.number().int().positive().max(CONTEXT_LIMIT_MAX).optional(),
+      // Only this kind, or everything but this kind. The store keeps session
+      // summaries alongside observations, discriminated only by `kind`.
+      kind: z.string().min(1).optional(),
+      excludeKind: z.string().min(1).optional(),
     }), (req, res, body) => {
       if (!this.ensureProjectAllowed(req, res, body.projectId)) return;
-      const memories = new MemoryItemsRepository(this.options.getDatabase()).search(body.projectId, body.query, body.limit ?? 10);
+      const repo = new MemoryItemsRepository(this.options.getDatabase());
+      const memories = body.query
+        ? repo.search(body.projectId, body.query, body.limit ?? 10)
+        : repo.listByProject(body.projectId, body.limit ?? 10, {
+            ...(body.kind ? { kind: body.kind } : {}),
+            ...(body.excludeKind ? { excludeKind: body.excludeKind } : {}),
+          });
       this.audit(req, 'memory.context', null, body.projectId);
       res.json({ memories, context: memories.map(memory => memory.narrative ?? memory.text ?? memory.title).filter(Boolean).join('\n\n') });
     }));

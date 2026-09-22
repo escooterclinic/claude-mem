@@ -76,7 +76,11 @@ export function renderHumanContextEconomics(
 
   output.push(`${colors.bright}${colors.cyan}Context Economics${colors.reset}`);
   output.push(`${colors.dim}  Loading: ${economics.totalObservations} observations (${economics.totalReadTokens.toLocaleString()} tokens to read)${colors.reset}`);
-  output.push(`${colors.dim}  Work investment: ${economics.totalDiscoveryTokens.toLocaleString()} tokens spent on research, building, and decisions${colors.reset}`);
+  //: Omitted when unmeasured -- see AgentFormatter. Zero here would claim no work
+  //: was ever done, which is the first line the operator reads.
+  if (economics.totalDiscoveryTokens > 0) {
+    output.push(`${colors.dim}  Work investment: ${economics.totalDiscoveryTokens.toLocaleString()} tokens spent on research, building, and decisions${colors.reset}`);
+  }
 
   if (economics.totalDiscoveryTokens > 0 && (config.showSavingsAmount || config.showSavingsPercent)) {
     let savingsLine = '  Your savings: ';
