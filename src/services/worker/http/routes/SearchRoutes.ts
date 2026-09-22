@@ -10,6 +10,7 @@ import { validateBody } from '../middleware/validateBody.js';
 import { logger } from '../../../../utils/logger.js';
 import { groupByDate } from '../../../../shared/timeline-formatting.js';
 import { countObservationsByProjects } from '../../../context/ObservationCompiler.js';
+import { isServerRuntime } from '../../../context/ContextBuilder.js';
 import { withObserverHealthWarning } from '../../../context/ContextBuilder.js';
 import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
@@ -96,11 +97,20 @@ export class SearchRoutes extends BaseRouteHandler {
     return this.cachedSettings;
   }
 
-  private projectsHaveObservations(
+  //: In SERVER runtime this question CANNOT be answered from the local file. The
+  //: local corpus is a mirror of the shared store, and on a machine whose mirror
+  //: was never populated for this project it reads as "no memory yet" while the
+  //: store holds a full history -- MEASURED 2026-09-23 on the second workstation,
+  //: which rendered the onboarding hint against a store holding 319,679 rows for
+  //: the same project. The hint is a LOCAL-runtime affordance; in server runtime
+  //: the context builder asks the store and renders its own empty state, which is
+  //: the only one entitled to say there is nothing.
+  private async projectsHaveObservations(
     sessionStore: ReturnType<SearchManager['getSessionStore']>,
     projects: string[],
     platformSource?: string,
-  ): boolean {
+  ): Promise<boolean> {
+    if (await isServerRuntime()) return true;
     const cacheKey = platformSource ? `${platformSource}\0${projects.join('\0')}` : projects.join('\0');
     if (this.projectsKnownNonEmpty.has(cacheKey)) {
       return true;
@@ -311,7 +321,7 @@ export class SearchRoutes extends BaseRouteHandler {
       const sessionStore = this.searchManager.getSessionStore();
       // Memoized: skips the COUNT(*) query once any project in the set has
       // observations. Hot-path: PostToolUse fires after every Read/Edit.
-      if (!this.projectsHaveObservations(sessionStore, projects, platformSource)) {
+      if (!(await this.projectsHaveObservations(sessionStore, projects, platformSource))) {
         const port = process.env.CLAUDE_MEM_WORKER_PORT ?? settings.CLAUDE_MEM_WORKER_PORT;
         const viewerUrl = `http://localhost:${port}`;
         const hintBody = WELCOME_HINT_TEMPLATE
