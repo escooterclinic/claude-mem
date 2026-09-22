@@ -127,6 +127,120 @@ describe('server REST API v1 routes', () => {
     expect((await endResponse.json()).session.status).toBe('completed');
   });
 
+  it('narrows /v1/context to one kind when asked, so summaries can be fetched apart from observations', async () => {
+    // The shared store keeps session summaries in the SAME table as observations,
+    // discriminated only by `kind`. A session-start block needs the two SEPARATELY:
+    // the observation list must not be polluted by summary rows, and the summary
+    // section cannot be built at all without asking for them on their own. Without
+    // this filter the client would have to over-fetch and sort it out locally, which
+    // is exactly the "read everything then throw most of it away" the route exists
+    // to avoid.
+    const { project } = await (await post('/v1/projects', { name: 'Kind Filter Project' })).json();
+
+    const note = await post('/v1/memories', {
+      projectId: project.id, kind: 'manual', type: 'note',
+      title: 'An ordinary observation', narrative: 'Not a summary.',
+    });
+    expect(note.status).toBe(201);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const summary = await post('/v1/memories', {
+      projectId: project.id, kind: 'summary', type: 'note',
+      title: 'A session summary', narrative: 'Summary body.',
+    });
+    expect(summary.status).toBe(201);
+    const summaryId = (await summary.json()).memory.id;
+
+    const response = await post('/v1/context', { projectId: project.id, kind: 'summary', limit: 10 });
+    expect(response.status).toBe(200);
+    const ids = (await response.json()).memories.map((m: any) => m.id);
+    expect(ids).toEqual([summaryId]);
+  });
+
+  it('excludes one kind when asked, so the observation list is not polluted by summaries', async () => {
+    const { project } = await (await post('/v1/projects', { name: 'Kind Exclusion Project' })).json();
+
+    const note = await post('/v1/memories', {
+      projectId: project.id, kind: 'manual', type: 'note',
+      title: 'An ordinary observation', narrative: 'Not a summary.',
+    });
+    const noteId = (await note.json()).memory.id;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await post('/v1/memories', {
+      projectId: project.id, kind: 'summary', type: 'note',
+      title: 'A session summary', narrative: 'Summary body.',
+    });
+
+    const response = await post('/v1/context', { projectId: project.id, excludeKind: 'summary', limit: 10 });
+    expect(response.status).toBe(200);
+    const ids = (await response.json()).memories.map((m: any) => m.id);
+    expect(ids).toEqual([noteId]);
+  });
+
+  it('accepts a limit above the old ceiling of 50', async () => {
+    // The ceiling was 50 and the session-start preload is capped BY it, not by
+    // choice: asking for 75 used to be a ValidationError, so the preload size was
+    // not actually configurable above 50 however the client was set.
+    const { project } = await (await post('/v1/projects', { name: 'Ceiling Project' })).json();
+    const response = await post('/v1/context', { projectId: project.id, limit: 200 });
+    expect(response.status).toBe(200);
+  });
+
+  it('still refuses a limit above the new ceiling rather than silently clamping', async () => {
+    const { project } = await (await post('/v1/projects', { name: 'Over Ceiling Project' })).json();
+    const response = await post('/v1/context', { projectId: project.id, limit: 201 });
+    expect(response.status).toBe(400);
+  });
+
+  it('returns recent observations when /v1/context is given no query', async () => {
+    // A session-start block asks "what happened recently". Until this, /v1/context
+    // ran the same relevance search as /v1/search and REQUIRED a query, so it could
+    // not answer that at all -- it returned whatever matched, from any date.
+    const projectResponse = await post('/v1/projects', { name: 'Recent Context Project' });
+    expect(projectResponse.status).toBe(201);
+    const { project } = await projectResponse.json();
+
+    const older = await post('/v1/memories', {
+      projectId: project.id,
+      kind: 'manual',
+      type: 'note',
+      title: 'Older note',
+      narrative: 'Written first.',
+    });
+    expect(older.status).toBe(201);
+    const olderId = (await older.json()).memory.id;
+
+    // created_at_epoch is server-assigned in milliseconds and the create schema
+    // omits it, so two writes in the same millisecond are genuinely tied and the
+    // ordering below would be arbitrary. Separate them in time rather than weaken
+    // the assertion — "newest first" is the behaviour under test.
+    await new Promise(resolve => setTimeout(resolve, 5));
+
+    const newer = await post('/v1/memories', {
+      projectId: project.id,
+      kind: 'manual',
+      type: 'note',
+      title: 'Newer note',
+      narrative: 'Written second.',
+    });
+    expect(newer.status).toBe(201);
+    const newerId = (await newer.json()).memory.id;
+
+    const response = await post('/v1/context', { projectId: project.id, limit: 10 });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    const ids = body.memories.map((o: any) => o.id);
+    expect(ids).toContain(olderId);
+    expect(ids).toContain(newerId);
+    // Newest first — that is the whole point of the query-less mode.
+    expect(ids.indexOf(newerId)).toBeLessThan(ids.indexOf(olderId));
+
+    // A query still selects by relevance, unchanged.
+    const queried = await post('/v1/context', { projectId: project.id, query: 'second' });
+    expect(queried.status).toBe(200);
+    expect((await queried.json()).context).toContain('Written second.');
+  });
+
   it('persists a full-field memory create with narrative populated and indexed (#2684)', async () => {
     const projectResponse = await post('/v1/projects', { name: 'Write Path Project' });
     expect(projectResponse.status).toBe(201);

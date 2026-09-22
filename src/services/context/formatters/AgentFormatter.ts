@@ -53,10 +53,15 @@ export function renderAgentContextEconomics(
 ): string[] {
   const output: string[] = [];
 
+  //: The work figure is omitted when nothing recorded it. The shared store keeps no
+  //: `discovery_tokens`, so a store-backed block sums to zero -- and "0t work" reads
+  //: as a measurement that no work was done rather than as an absent measurement.
   const parts: string[] = [
     `${economics.totalObservations} obs (${economics.totalReadTokens.toLocaleString()}t read)`,
-    `${economics.totalDiscoveryTokens.toLocaleString()}t work`
   ];
+  if (economics.totalDiscoveryTokens > 0) {
+    parts.push(`${economics.totalDiscoveryTokens.toLocaleString()}t work`);
+  }
 
   if (economics.totalDiscoveryTokens > 0 && (config.showSavingsAmount || config.showSavingsPercent)) {
     if (config.showSavingsPercent) {

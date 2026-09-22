@@ -7,6 +7,7 @@ import { DB_PATH } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { CONTEXT_LIMIT_MAX } from '../../shared/context-limits.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from '../sqlite/connection.js';
 
 import type { ContextInput, ContextConfig, Observation, SessionSummary } from './types.js';
@@ -259,6 +260,243 @@ function appendObserverHealthWarning(warning: string, text: string): string {
  * precisely when context was being dropped. `sessionCount` is the same slice
  * `buildContextOutput` takes for `displaySummaries`.
  */
+
+//: THE SHARED STORE AS A ROW SOURCE -- deliberately here, and not in the hook.
+//:
+//: In `server` runtime every WRITE goes to the shared store while this READ opened
+//: the per-machine SQLite file. Both halves already shipped and were never joined:
+//: the client has carried contextObservations() -> POST /v1/context all along and
+//: nothing called it. MEASURED 2026-09-17: the local corpus took 1 observation in
+//: 24h against the store's 18,184.
+//:
+//: The FIRST attempt at this fix injected the route's pre-joined `context` string
+//: straight into the hook's output, and that was wrong in a way worth recording: it
+//: bypassed fitContextToBudget, so the block came back at 52,337 characters against
+//: the CONTEXT_OUTPUT_LIMIT of 10,000 that #3802 exists to enforce -- and it lost
+//: the header, the legend, the ids and the savings stats, 13,084 tokens where the
+//: local block spent 1,787. Replacing the ROW SOURCE instead leaves the renderer,
+//: the budget fitter, the token counter and the stats exactly as they were: the
+//: only thing that changes is WHERE the rows came from.
+//: The route's own ceiling, imported rather than copied. Held as a literal here
+//: once, it silently became the real cap on the session-start preload: asking for
+//: more than the route allowed was a ValidationError, so the block could never
+//: grow past it however CLAUDE_MEM_CONTEXT_OBSERVATIONS was set.
+const SERVER_CONTEXT_MAX_OBSERVATIONS = CONTEXT_LIMIT_MAX;
+
+//: Session summaries live in the SAME store table as observations, told apart only
+//: by `kind`. The observation list must exclude them or a summary lands in the list
+//: reading as an ordinary memory; the summary section must ask for them alone or it
+//: gets none -- 503 summaries against 347,146 observations on the hub, 2026-09-23.
+const SUMMARY_KIND = 'summary';
+
+//: Resolved once, for both the observation read and the summary read: two call
+//: sites resolving the runtime separately can disagree about which store they are
+//: talking to, and the failure would show as a block half from each.
+async function resolveServerRuntime(): Promise<{ projectId: string; client: { contextObservations: (i: Record<string, unknown>) => Promise<{ observations?: unknown[] } | undefined> } } | null> {
+  let runtime;
+  try {
+    const mod = await import('../hooks/runtime-selector.js');
+    runtime = mod.resolveRuntimeContext();
+  } catch (error) {
+    logger.warn('HOOK', '[server] runtime unresolved for context', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+  if (runtime.runtime !== 'server') return null;
+  return runtime as never;
+}
+
+/** Observations from the shared store, or null when it gave no answer. */
+export async function fetchServerObservations(
+  config: ContextConfig,
+  project: string,
+  platformSource: string | undefined
+): Promise<Observation[] | null> {
+  const runtime = await resolveServerRuntime();
+  if (!runtime) return null;
+
+  const want = Number(config.totalObservationCount) || 20;
+  try {
+    const result = await runtime.client.contextObservations({
+      projectId: runtime.projectId,
+      // NO `query` KEY. With one the route ranks by FTS; with the key absent it
+      // returns the NEWEST, which is what a session-start block is. `query: ''`
+      // is not a third option -- the route's schema rejects it (min 1 char).
+      limit: Math.max(1, Math.min(SERVER_CONTEXT_MAX_OBSERVATIONS, want)),
+      excludeKind: SUMMARY_KIND,
+      ...(platformSource ? { platformSource } : {}),
+    });
+    //: NOT `rows.length === 0 -> null`. An empty answer from a store that HAS no
+    //: rows yet is a legitimate first run; treating it as "no answer" makes an
+    //: empty store indistinguishable from an unreachable one, and only one of
+    //: those is a fault. A missing `observations` array IS no answer.
+    if (!Array.isArray(result?.observations)) return null;
+    return result.observations.map((r, i) => toLocalObservationShape(r as Record<string, unknown>, i, project, platformSource));
+  } catch (error) {
+    logger.warn('HOOK', '[server] observations unavailable from the shared store', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+//: The row shape mirrors the local SELECT field for field. `facts`, `concepts`,
+//: `files_read` and `files_modified` are JSON *strings* in the local schema (the
+//: writer calls JSON.stringify on each), so they are stringified here too -- handing
+//: the renderer raw arrays would change what the token counter measures and silently
+//: skew the savings stats. `kind` on the server carries the real observation type
+//: (discovery, bugfix, change, feature, decision, ...), which is what `type` must be
+//: for the emoji and the type histogram -- NOT the literal "observation".
+export function toLocalObservationShape(
+  r: Record<string, unknown>,
+  index: number,
+  project: string,
+  platformSource: string | undefined
+): Observation {
+  const meta = (r.metadata ?? {}) as Record<string, unknown>;
+  const pick = (...k: string[]): unknown => {
+    for (const n of k) {
+      if (r[n] !== undefined && r[n] !== null) return r[n];
+      if (meta[n] !== undefined && meta[n] !== null) return meta[n];
+    }
+    return null;
+  };
+  const str = (v: unknown): string | null => (typeof v === 'string' ? v : v == null ? null : String(v));
+  const json = (v: unknown): string | null => {
+    if (v == null) return null;
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v); } catch { return null; }
+  };
+  const epoch = Number(pick('createdAtEpoch', 'created_at_epoch')) || Date.now();
+  const content = str(r.content) ?? '';
+  const firstLine = content.split('\n', 1)[0] ?? '';
+  return {
+    id: index + 1,
+    memory_session_id: str(pick('serverSessionId', 'memory_session_id')) ?? '',
+    platform_source: platformSource ?? '',
+    type: str(pick('kind', 'type')) ?? 'discovery',
+    title: str(pick('title')) ?? firstLine,
+    subtitle: str(pick('subtitle')),
+    narrative: str(pick('narrative')) ?? (content || null),
+    facts: json(pick('facts')),
+    concepts: json(pick('concepts')),
+    files_read: json(pick('files_read', 'filesRead')),
+    files_modified: json(pick('files_modified', 'filesModified')),
+    //: NULL, not 0. The shared store does not record it -- no `discovery_tokens`
+    //: key exists in any of 347,146 rows' metadata, measured 2026-09-23. Zero would
+    //: let the economics block print a savings percentage it never measured.
+    discovery_tokens: null,
+    created_at: new Date(epoch).toISOString(),
+    created_at_epoch: epoch,
+    project,
+  };
+}
+
+//: Summaries, fetched on their own because only `kind` tells them apart. The hub
+//: writes the five fields the local `session_summaries` table has as metadata keys
+//: of the same names, so the mapping is field for field and lossless.
+export async function fetchServerSummaries(
+  config: ContextConfig,
+  project: string,
+  platformSource: string | undefined
+): Promise<SessionSummary[] | null> {
+  const runtime = await resolveServerRuntime();
+  if (!runtime) return null;
+
+  const want = Number(config.sessionCount) || 5;
+  try {
+    const result = await runtime.client.contextObservations({
+      projectId: runtime.projectId,
+      limit: Math.max(1, Math.min(SERVER_CONTEXT_MAX_OBSERVATIONS, want + 1)),
+      kind: SUMMARY_KIND,
+      ...(platformSource ? { platformSource } : {}),
+    });
+    if (!Array.isArray(result?.observations)) return null;
+    return result.observations.map((r, i) => toLocalSummaryShape(r as Record<string, unknown>, i, project, platformSource));
+  } catch (error) {
+    logger.warn('HOOK', '[server] summaries unavailable from the shared store', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+export function toLocalSummaryShape(
+  r: Record<string, unknown>,
+  index: number,
+  project: string,
+  platformSource: string | undefined
+): SessionSummary {
+  const meta = (r.metadata ?? {}) as Record<string, unknown>;
+  const field = (...k: string[]): string | null => {
+    for (const n of k) {
+      const v = meta[n] ?? r[n];
+      if (typeof v === 'string' && v.length > 0) return v;
+    }
+    return null;
+  };
+  const epoch = Number(r.createdAtEpoch ?? r.created_at_epoch) || Date.now();
+  return {
+    id: index + 1,
+    memory_session_id: (typeof r.serverSessionId === 'string' ? r.serverSessionId : null) ?? '',
+    platform_source: platformSource ?? '',
+    request: field('request'),
+    investigated: field('investigated'),
+    learned: field('learned'),
+    completed: field('completed'),
+    next_steps: field('next_steps', 'nextSteps'),
+    created_at: new Date(epoch).toISOString(),
+    created_at_epoch: epoch,
+    project,
+  };
+}
+
+//: Whether this machine reads its memory from the shared store at all. Needed
+//: separately from resolveServerRuntime(), which answers null both for "not server
+//: runtime" and for "server runtime, could not resolve" -- and the whole point of
+//: the rule below is that those two must not be treated alike.
+export async function isServerRuntime(): Promise<boolean> {
+  try {
+    const mod = await import('../hooks/runtime-selector.js');
+    return mod.resolveRuntimeContext().runtime === 'server';
+  } catch {
+    return false;
+  }
+}
+
+//: THE RULE: in server runtime the block is built from the shared store or it is
+//: built DEGRADED. It is never quietly built from the local corpus.
+//:
+//: The first cut of this fix did fall back, reasoning that a stale corpus beats no
+//: memory. That is what hid the fault for five days: every write went to the hub
+//: while the block came off a local mirror frozen at 2026-09-19T23:05Z, 128,104
+//: rows against the hub's 347,146 -- and a silent fallback looks exactly like
+//: health. The cost of the fallback is not a stale block; it is that nobody can
+//: TELL it is stale.
+//:
+//: `null` from a fetcher means "no answer" (unreachable, malformed, wrong runtime).
+//: `[]` means "asked, and the store has none" -- a legitimate first run, not a
+//: fault, and not something to shout about.
+export function serverRowsOrDegraded(
+  serverObservations: Observation[] | null,
+  serverSummaries: SessionSummary[] | null
+): { observations: Observation[]; summaries: SessionSummary[]; degraded: string | null } {
+  const missing: string[] = [];
+  if (serverObservations === null) missing.push('observations');
+  if (serverSummaries === null) missing.push('summaries');
+  return {
+    observations: serverObservations ?? [],
+    summaries: serverSummaries ?? [],
+    degraded: missing.length === 0
+      ? null
+      : `memory DEGRADED — the shared store did not answer for ${missing.join(' or ')}; `
+        + 'this block is NOT your history and the local corpus was deliberately not '
+        + 'substituted for it (it is a mirror, and a stale one is indistinguishable '
+        + 'from a healthy block). Check the store before trusting what is below.',
+  };
+}
+
 export function fitContextForDelivery(
   observations: Observation[],
   summaries: SessionSummary[],
@@ -322,11 +560,30 @@ export async function generateContextWithStats(
       ? normalizePlatformSource(input.platformSource)
       : undefined;
     const queryProjects = projects.length > 1 ? projects : [project];
-    const observations = queryObservationsMulti(db, queryProjects, config, platformSource);
-    const summaries = querySummariesMulti(db, queryProjects, config, platformSource);
+    // In SERVER runtime the shared store is the only source. The local SQLite file
+    // is a mirror of it and is never substituted when the store is quiet -- see
+    // serverRowsOrDegraded for why that fallback is the bug and not the safety net.
+    // In worker runtime there IS no shared store and the local corpus is the truth.
+    let observations: Observation[];
+    let summaries: SessionSummary[];
+    let degraded: string | null = null;
+    if (await isServerRuntime()) {
+      const [serverObservations, serverSummaries] = await Promise.all([
+        fetchServerObservations(config, project, platformSource),
+        fetchServerSummaries(config, project, platformSource),
+      ]);
+      const picked = serverRowsOrDegraded(serverObservations, serverSummaries);
+      observations = picked.observations;
+      summaries = picked.summaries;
+      degraded = picked.degraded;
+    } else {
+      observations = queryObservationsMulti(db, queryProjects, config, platformSource);
+      summaries = querySummariesMulti(db, queryProjects, config, platformSource);
+    }
 
     if (observations.length === 0 && summaries.length === 0) {
-      return { text: withObserverHealthWarning(renderEmptyState(project, forHuman), forHuman), stats: null };
+      const empty = appendObserverHealthWarning(degraded ?? '', renderEmptyState(project, forHuman));
+      return { text: withObserverHealthWarning(empty, forHuman), stats: null };
     }
 
     // `--full` is an explicit human request for everything; only the block that
@@ -335,7 +592,7 @@ export async function generateContextWithStats(
       observations,
       summaries,
       config,
-      observerHealthWarning(forHuman),
+      appendObserverHealthWarning(degraded ?? '', observerHealthWarning(forHuman)),
       (items, cfg) =>
         buildContextOutput(project, items, summaries, cfg, cwd, input?.session_id, forHuman),
       input?.full ? Number.POSITIVE_INFINITY : CONTEXT_OUTPUT_LIMIT,

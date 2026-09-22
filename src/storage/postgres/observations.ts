@@ -131,11 +131,18 @@ export class PostgresObservationRepository {
     return row ? mapObservationRow(row) : null;
   }
 
+  //: `kind` / `excludeKind` -- session summaries live in THIS table beside the
+  //: observations, discriminated only by `kind`. A session-start block needs the
+  //: two separately: summaries on their own to render the summary section, and
+  //: everything-but-summaries for the observation list. `IS DISTINCT FROM` rather
+  //: than `<>` so a row whose kind is NULL is kept, not silently dropped.
   async listByProject(input: {
     projectId: string;
     teamId: string;
     serverSessionId?: string | null;
     limit?: number;
+    kind?: string | null;
+    excludeKind?: string | null;
   }): Promise<PostgresObservation[]> {
     const result = await this.client.query<ObservationRow>(
       `
@@ -143,10 +150,19 @@ export class PostgresObservationRepository {
         WHERE project_id = $1
           AND team_id = $2
           AND ($3::text IS NULL OR server_session_id = $3)
+          AND ($4::text IS NULL OR kind = $4)
+          AND ($5::text IS NULL OR kind IS DISTINCT FROM $5)
         ORDER BY created_at DESC
-        LIMIT $4
+        LIMIT $6
       `,
-      [input.projectId, input.teamId, input.serverSessionId ?? null, input.limit ?? 100]
+      [
+        input.projectId,
+        input.teamId,
+        input.serverSessionId ?? null,
+        input.kind ?? null,
+        input.excludeKind ?? null,
+        input.limit ?? 100,
+      ]
     );
     return result.rows.map(mapObservationRow);
   }
