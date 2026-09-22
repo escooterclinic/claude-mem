@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Application, Request, RequestHandler, Response } from 'express';
+import { CONTEXT_LIMIT_MAX } from '../../../shared/context-limits.js';
 import { z, type ZodTypeAny } from 'zod';
 import type { RouteHandler } from '../../../services/server/Server.js';
 import { CreateAgentEventSchema } from '../../../core/schemas/agent-event.js';
@@ -978,8 +979,12 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         // Optional: a context request with no query asks for the most RECENT
         // observations, which is what a session-start block actually wants.
         query: z.string().min(1).optional(),
-        limit: z.number().int().positive().max(50).optional(),
+        limit: z.number().int().positive().max(CONTEXT_LIMIT_MAX).optional(),
         platformSource: z.string().min(1).nullable().optional(),
+        // Only this kind, or everything but this kind. Session summaries live in
+        // the observations table, discriminated only by `kind`.
+        kind: z.string().min(1).optional(),
+        excludeKind: z.string().min(1).optional(),
       }),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
@@ -1001,6 +1006,8 @@ export class ServerV1PostgresRoutes implements RouteHandler {
                 projectId: body.projectId,
                 teamId,
                 limit: body.limit ?? 10,
+                kind: body.kind ?? null,
+                excludeKind: body.excludeKind ?? null,
               });
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));

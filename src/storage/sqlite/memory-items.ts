@@ -233,13 +233,33 @@ export class MemoryItemsRepository {
     return row ? mapMemorySourceRow(row) : null;
   }
 
-  listByProject(projectId: string, limit = 100): MemoryItem[] {
+  //: `kind` and `excludeKind` are what let one caller ask for session summaries and
+  //: another for everything BUT them. The shared store keeps both in this table,
+  //: discriminated only by `kind`, so without a filter here a caller wanting the
+  //: observation list has to over-fetch and discard -- and a caller wanting the
+  //: summaries cannot express the request at all.
+  listByProject(
+    projectId: string,
+    limit = 100,
+    filter: { kind?: string; excludeKind?: string } = {}
+  ): MemoryItem[] {
+    const clauses = ['project_id = ?'];
+    const params: (string | number)[] = [projectId];
+    if (filter.kind) {
+      clauses.push('kind = ?');
+      params.push(filter.kind);
+    }
+    if (filter.excludeKind) {
+      clauses.push('kind IS NOT ?');
+      params.push(filter.excludeKind);
+    }
+    params.push(limit);
     const rows = this.db.prepare(`
       SELECT * FROM memory_items
-      WHERE project_id = ?
+      WHERE ${clauses.join(' AND ')}
       ORDER BY created_at_epoch DESC
       LIMIT ?
-    `).all(projectId, limit) as MemoryItemRow[];
+    `).all(...params) as MemoryItemRow[];
     return rows.map(mapMemoryItemRow);
   }
 

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test';
 
 import * as realRuntimeSelector from '../../src/services/hooks/runtime-selector.js';
+import { CONTEXT_LIMIT_MAX } from '../../src/shared/context-limits.js';
 
 /**
  * In `server` runtime the session-start block must be built from the SHARED store.
@@ -28,7 +29,7 @@ mock.module('../../src/services/hooks/runtime-selector.js', () => ({
   resolveRuntimeContext: () => runtimeStub,
 }));
 
-const { fetchServerObservations, toLocalObservationShape } =
+const { fetchServerObservations, fetchServerSummaries, toLocalObservationShape } =
   await import('../../src/services/context/ContextBuilder.js');
 
 const serverRuntime = () => ({
@@ -79,8 +80,11 @@ describe('the shared store as a row source', () => {
     runtimeStub = serverRuntime();
     impl = async () => ({ observations: [{ id: 'x', content: 'c', createdAtEpoch: 1 }] });
     await fetchServerObservations(cfg(500), 'p', undefined);
-    // The route REFUSES above 50: unclamped this does not degrade, it fails empty.
-    expect(contextCalls[0].limit).toBe(50);
+    // The route REFUSES above its ceiling: unclamped this does not degrade, it
+    // fails empty. Asserted against the SHARED constant rather than a literal --
+    // the ceiling was 50, moved to 200, and a literal here is how the client and
+    // the route come to disagree without either test going red.
+    expect(contextCalls[0].limit).toBe(CONTEXT_LIMIT_MAX);
   });
 
   it('falls back to null when the store throws', async () => {
@@ -125,5 +129,72 @@ describe('the row shape the renderer is handed', () => {
   it('titles a row from its first line when the store carries no title', () => {
     const r = toLocalObservationShape({ id: 'a', content: 'First line\nrest of it', createdAtEpoch: 1 }, 0, 'p', undefined);
     expect(r.title).toBe('First line');
+  });
+});
+
+describe('the row shape mirrors the compiler SELECT, field for field', () => {
+  // queryObservationsMulti selects exactly: id, memory_session_id, platform_source,
+  // type, title, subtitle, narrative, facts, concepts, files_read, files_modified,
+  // discovery_tokens, created_at, created_at_epoch, project. A hub row that carries
+  // a DIFFERENT set is not a drop-in: the renderer reads discovery_tokens for the
+  // savings stats, and fields nobody reads are dead weight the token counter still
+  // has to be reasoned about.
+  const SELECTED = [
+    'id', 'memory_session_id', 'platform_source', 'type', 'title', 'subtitle',
+    'narrative', 'facts', 'concepts', 'files_read', 'files_modified',
+    'discovery_tokens', 'created_at', 'created_at_epoch', 'project',
+  ].sort();
+
+  it('carries every field the compiler selects and no others', () => {
+    const r = toLocalObservationShape({ id: 'a', kind: 'bugfix', content: 'x', createdAtEpoch: 1 }, 0, 'p', undefined);
+    expect(Object.keys(r).sort()).toEqual(SELECTED);
+  });
+
+  it('reports discovery_tokens as null, because the shared store does not record it', () => {
+    // MEASURED 2026-09-23 against the hub: no observation metadata key named
+    // discovery_tokens exists in 347,146 rows. Defaulting it to 0 would let the
+    // economics block print "0% savings" as though it had measured something.
+    const r = toLocalObservationShape({ id: 'a', content: 'x', createdAtEpoch: 1 }, 0, 'p', undefined);
+    expect(r.discovery_tokens).toBeNull();
+  });
+});
+
+describe('summaries come from the shared store too', () => {
+  it('maps a hub summary row onto the local SessionSummary shape', async () => {
+    runtimeStub = serverRuntime();
+    impl = async () => ({ observations: [{
+      id: 's1', kind: 'summary', content: 'Request: do the thing', createdAtEpoch: 1_760_000_000_000,
+      serverSessionId: 'sess-1',
+      metadata: {
+        request: 'do the thing', investigated: 'looked', learned: 'a lot',
+        completed: 'it', next_steps: 'none',
+      },
+    }] });
+    const rows = await fetchServerSummaries(cfg(20), 'p', undefined);
+    expect(rows).not.toBeNull();
+    expect(rows!).toHaveLength(1);
+    expect(rows![0].request).toBe('do the thing');
+    expect(rows![0].investigated).toBe('looked');
+    expect(rows![0].learned).toBe('a lot');
+    expect(rows![0].completed).toBe('it');
+    expect(rows![0].next_steps).toBe('none');
+    expect(rows![0].memory_session_id).toBe('sess-1');
+  });
+
+  it('asks the route for the summary kind ONLY', async () => {
+    // Without the filter the newest N rows are overwhelmingly observations and a
+    // summary may not appear at all -- 503 summaries against 347,146 observations
+    // on the hub, measured 2026-09-23.
+    runtimeStub = serverRuntime();
+    impl = async () => ({ observations: [] });
+    await fetchServerSummaries(cfg(20), 'p', undefined);
+    expect(contextCalls[0].kind).toBe('summary');
+  });
+
+  it('keeps summaries OUT of the observation list', async () => {
+    runtimeStub = serverRuntime();
+    impl = async () => ({ observations: [{ id: 'x', content: 'c', createdAtEpoch: 1 }] });
+    await fetchServerObservations(cfg(20), 'p', undefined);
+    expect(contextCalls[0].excludeKind).toBe('summary');
   });
 });
