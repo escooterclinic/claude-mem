@@ -376,7 +376,7 @@ describe('Plugin Distribution - package.json Files Field', () => {
     expect(filePaths.has('dist/bug-report/index.js')).toBe(true);
     expect(filePaths.has('plugin/sqlite/SessionStore.js')).toBe(true);
     expect(filePaths.has('plugin/sqlite/observations/files.js')).toBe(true);
-  });
+  }, 30_000); // spawns npm pack: 2s warm, ~12s on a loaded host — past bun's 5s default
 });
 
 describe('Plugin Distribution - Build Script Verification', () => {
