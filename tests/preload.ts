@@ -16,6 +16,18 @@ import { join } from 'path';
  * cleanup (an afterAll here could rip the dir out from under frozen module
  * constants while later test files still run).
  */
+/**
+ * Ambient-settings scrub: SettingsDefaultsManager lets any CLAUDE_MEM_* env
+ * var override its defaults, so a developer shell (or a Claude Code session
+ * whose settings.json `env` block exports e.g. CLAUDE_MEM_HOOK_FAIL_LOUD_THRESHOLD)
+ * turned default-asserting tests red on that machine only. Tests see the
+ * defaults CI sees; a test that needs a value sets it itself. DATA_DIR is kept
+ * (the tripwire below honours a caller-chosen safe dir).
+ */
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('CLAUDE_MEM_') && key !== 'CLAUDE_MEM_DATA_DIR') delete process.env[key];
+}
+
 if (!process.env.CLAUDE_MEM_DATA_DIR) {
   process.env.CLAUDE_MEM_DATA_DIR = mkdtempSync(join(tmpdir(), 'claude-mem-test-run-'));
 }
