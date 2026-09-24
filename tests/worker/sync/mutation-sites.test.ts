@@ -385,7 +385,7 @@ describe('mutation sites', () => {
     } finally {
       db.close();
     }
-  });
+  }, 30_000); // 5 git spawns: 3.3s at load 10, past bun's 5s default on a loaded host
 
     it('adopts branched and detached worktrees proven by a remote commit while preserving negative space', async () => {
     const bareOrigin = join(tempDir, 'origin.git');
