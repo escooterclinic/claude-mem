@@ -1,0 +1,144 @@
+# THE REPO CONTRACT — what this repo is, what it does, and what proves it.
+#
+# Every field below is REQUIRED. A field left as `TODO:` counts as ABSENT and the gate
+# refuses, deliberately: a contract nobody filled in is worse than no contract, because it
+# reads as compliance. Write prose a new reader can act on, not a restatement of the name.
+#
+# Checked by `repo-contract-guard --check`, which also verifies this repo has tests, has
+# the commit-time gate, and offloads that gate to the runner. Any one missing is a failure.
+
+[repo]
+name         = "claude-mem"
+what_it_is   = "The escooterclinic fork of claude-mem: a Claude Code / Codex plugin plus a local worker service that records and recalls session memory"
+what_it_does = """
+Captures what every Claude Code and Codex session on the operator's machines does (hooks ->
+worker -> SQLite/Chroma), summarises it into observations, and injects the relevant ones at
+the next session start and on search. Both Claude and Codex install THIS fork, from its
+committed plugin/ bundles. If it stops, sessions start blind to prior work and new work is
+not remembered; if the committed bundles drift from what bun.lock builds, what runs is not
+what was reviewed. Upstream is thedotmack/claude-mem; fork deviations stay minimal.
+"""
+owner        = "escooterclinic (Patryk)"
+status       = "active"   # active | frozen | archived
+
+[rules]
+# The rules THIS repo obeys that a reader could otherwise only infer by reading the code —
+# invariants, orderings, things that must never happen. One statement per line. If a rule
+# matters enough to write here, it should also be a test; say which one in `tests.covers`.
+must = [
+  "The committed plugin/ bundles are exactly what a frozen build of HEAD from the root bun.lock produces (scripts/check-bundles-reproducible.sh, run by tests/run.sh)",
+  "Tests never read the ambient CLAUDE_MEM_* environment of the machine they run on (tests/preload-env-scrub.test.ts)",
+  "Every subprocess-spawning test that relies on bun's 5s default has 5x headroom, or carries its own budget (scripts/check-spawn-test-headroom.sh)",
+  "GitHub Actions stay off: the gate runner, via tests/run.sh, is where this fork's checks run",
+]
+
+[tests]
+command = "./verify.sh"          # the command that runs the suite
+suite   = "tests/"               # where the tests live
+#: Use `"."` ONLY if this repo's tests genuinely live at the ROOT rather than in a
+#: directory. It is accepted (operator decision 2026-08-25) because some repos really
+#: are shaped that way, but it accepts a test-named file anywhere in the repo — so a
+#: real subdirectory is better whenever one exists.
+covers  = """
+The bun suite under tests/ (~3900 tests) pins the hook -> worker -> storage pipeline, the
+Chroma MCP manager's singleton and writer-lock rules, process-tree kill safety (PID reuse),
+worker spawn/status JSON for the hook framework, the npm tarball contents, and the
+preload env scrub. tests/run.sh adds the bundle-reproducibility rule and the spawn-test
+headroom rule above, each of which exits non-zero on drift.
+"""
+coverage_floor = 80   # NOT YET MEASURED for this bun suite: the gate runs `bun test` without --coverage
+
+# OPTIONAL: handover-only commits may inherit an unexpired runner green. Read ONLY from
+# the default branch; this change cannot declare itself inert. Suite/code/configuration
+# and executable files are always excluded, even when a glob matches them.
+# inert_paths = ["docs/handovers/*.md"]
+
+# DECLARE HOW MANY WORKERS this suite can safely run under. Measure it using
+# docs/playbooks/gate-runner-capacity.md, Step 2; use 1 with a comment explaining why
+# when the suite genuinely cannot run in parallel. Never use `auto`: absence makes the
+# runner use serial execution and is reported on every commit.
+#
+# WHY THE REPO DECLARES IT INSTEAD OF THE RUNNER WORKING IT OUT: `-n auto` is MEASURED to
+# FAIL on a real repo in this org, exhausting its `max_connections = 100`. A runner that
+# parallelised every suite on its own would turn a slow gate RED wearing the names of
+# innocent tests. How parallel a suite can safely run is a property of the SUITE — its
+# database pool, its ports, its temp directories — and only this repo knows it.
+#
+# WHY IT MATTERS: the merge-validation budget is 900s. A suite that runs serially for
+# longer than that can NEVER produce a verdict, so it is not slow, it is unmergeable.
+# Measured on one repo: 1297s serial, 285-337s at 8 workers.
+#
+# MEASURE IT FOR THIS REPO. A degree that is safe for one suite is not evidence about
+# another, and `auto` is refused by name. The runner also refuses a degree above its own
+# core count rather than quietly running fewer.
+# parallel = 8
+
+# OPTIONAL COVERAGE IMPACT SELECTION. This may narrow only commit/push runs; merge
+# validation remains full. Opt in only after a full trunk run has produced a usable map
+# and tracer overhead has been measured on the runner.
+# impact_selection = "coverage"
+
+[runner]
+# WHAT THE GATE RUNNER MUST PROVIDE for this suite to run there. This is the declaration
+# that makes provisioning automatic: the runner installs the union of what every repo
+# declares, so nobody hand-writes a per-toolchain install script again. Use `name@version`.
+# An unknown toolchain name is REFUSED rather than skipped — a typo that installed nothing
+# would let this repo believe it was provisioned.
+#
+#   known: python, node, go, postgres, flutter, jdk, android-sdk, pnpm, yarn, shellcheck,
+#          ruby, redis
+#   e.g.   toolchains = ["flutter@3.7.12", "jdk@11", "android-sdk@31"]
+toolchains = ["bun@1.4.2", "node@22.22.0"]
+
+# THE OS PACKAGES this suite needs — the other half of provisioning, and the half that
+# used to have nowhere to live. A toolchain is version-selected and lives under /opt; an
+# apt package is not. Before this field, every OS package the runner installs was a
+# hard-coded default inside a SHARED `ensure-gate-*.sh`, so a repo needing `libssl-dev`
+# had to hand-edit shared infrastructure and redeploy it — once per repo, forever.
+#
+# OPTIONAL: a repo that needs no OS package simply omits the field. There is no `none`
+# sentinel here, unlike `toolchains`, because an absent optional field already means
+# exactly "nothing", with nothing to confuse it with.
+#
+# ALLOWLISTED, and that is the whole security of it: the gate runner is SHARED by every
+# repo in the org, so a declaration that could install anything would let one contract put
+# a package of its choosing under everybody else's test run. Declaring is free; installing
+# needs the name on the reviewed list in `policy/repo-contract.json`. An unknown name is
+# REFUSED, never skipped — a repo told nothing would read a green gate as "provisioned".
+# Ask the operator to add a genuinely new package: it is once per package for the whole
+# org, not once per repo.
+#
+#   known: curl, libpq5, libssl-dev, pkg-config, postgresql, postgresql-16-pgvector,
+#          redis-server, sqlite3, xz-utils, zsh
+#   e.g.   system_packages = ["libssl-dev", "pkg-config"]
+# system_packages = []
+
+# THE PYTHON PACKAGES this suite IMPORTS — the third thing a gate needs, and the last one
+# that had nowhere to live. A toolchain is an interpreter; an OS package is apt; these are
+# what `import` reaches for, and before this field every one of them was a hard-coded
+# default inside the shared `deploy/gate-runner/ensure-gate-venvs.sh`.
+#
+# WHY IT EXISTS, measured: `litellm-key-manager` (apscheduler), `sms-gateway` (pyserial)
+# and `grafana-scripts-baselinker-mgr` (psycopg2 via pytest-postgresql) all DIED AT
+# COLLECTION on the runner in ONE session. Not running and failing — NOT RUNNING. A suite
+# that cannot collect is indistinguishable from the outside from a suite nobody wrote.
+#
+# OPTIONAL, like `system_packages`: omit it and this repo asks for nothing.
+#
+# ⚠️ ONE SHARED VENV, SO A VERSION CONFLICT IS REFUSED — the one rule that is NOT like
+# `toolchains`. The runner installs python 3.12 and 3.14 side by side, so two repos may
+# pin different TOOLCHAIN versions. A venv holds exactly ONE version of a distribution, so
+# if two repos pin different versions of one package the union REFUSES it by name and
+# installs it NOT AT ALL, for both of them, until a human reconciles the pins. It will not
+# pick a winner: the loser would get a green gate over a suite judged against a version it
+# never asked for. So pin only when you genuinely need to, and prefer a bare name.
+#
+# Write a bare name or an EXACT pin. A range (`>=2.0`) is REFUSED by name — it cannot be
+# reconciled against another repo's range without a resolver.
+#
+#   known: aiosqlite, apscheduler, asgi-lifespan, coverage, fastapi, httpx, itsdangerous, jinja2,
+#          psycopg2-binary, pyjwt, pyserial, pytest, pytest-asyncio, pytest-cov,
+#          pytest-postgresql, pytest-timeout, pytest-xdist, pyyaml, requests,
+#          ruff, sqlalchemy, uvicorn, websockets
+#   e.g.   py_packages = ["apscheduler", "pyserial"]
+# py_packages = []
