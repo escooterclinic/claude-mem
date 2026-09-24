@@ -152,11 +152,11 @@ describe('ChromaMcpManager SSL flag regression (#1286)', () => {
     currentSettings = {};
     ChromaMcpManager.setUvxAvailabilityProbeForTesting(() => true);
     mgr = ChromaMcpManager.getInstance();
-  });
+  }, 30_000); // reset() stops the prior test's subprocess tree; bun runs hooks under the 5s default, not the test's budget (measured 2026-09-24)
 
   it('emits --ssl false when CLAUDE_MEM_CHROMA_SSL=false', async () => {
     await assertSslFlag('false', 'false');
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('emits --ssl true when CLAUDE_MEM_CHROMA_SSL=true', async () => {
     await assertSslFlag('true', 'true');

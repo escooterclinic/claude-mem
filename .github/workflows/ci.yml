@@ -45,8 +45,8 @@ jobs:
 
       # escooterclinic fork: the committed plugin/ bundles must equal a frozen
       # rebuild of this commit from the committed root bun.lock.
-      - name: Bundles reproducible from bun.lock
-        run: scripts/check-bundles-reproducible.sh
+      # escooterclinic fork: the bundle-reproducibility check runs on the org gate runner
+      # via tests/run.sh (Actions are OFF org-wide by decision, so a step here never runs).
 
       # The in-process server-runtime smoke test (tests/server/server-runtime-smoke.test.ts,
       # #2550) runs here with no Docker: it boots the server HTTP surface in

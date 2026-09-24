@@ -198,5 +198,5 @@ describe('worker-unreachable fail-loud latch', () => {
     expect(new TextDecoder().decode(thresholdFailure.stderr)).toContain(
       'claude-mem worker unreachable for 2 consecutive hooks.'
     );
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 });
