@@ -233,7 +233,7 @@ describe('worker-json-status', () => {
         expect(parsed.continue).toBe(true);
         expect(parsed.suppressOutput).toBe(true);
         expect(['ready', 'error']).toContain(parsed.status);
-      });
+      }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
       it('should match expected JSON structure when worker is healthy', () => {
         if (!existsSync(WORKER_SCRIPT)) {
@@ -250,7 +250,7 @@ describe('worker-json-status', () => {
         } else if (parsed.status === 'error') {
           expect(typeof parsed.message).toBe('string');
         }
-      });
+      }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
     });
   });
 
@@ -264,7 +264,7 @@ describe('worker-json-status', () => {
       const { exitCode } = runWorkerStart();
 
       expect(exitCode).toBe(0);
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
     it('should output JSON on stdout (not stderr)', () => {
       if (!existsSync(WORKER_SCRIPT)) {
@@ -294,7 +294,7 @@ describe('worker-json-status', () => {
           // stderr is not JSON, which is expected (logs, etc.)
         }
       }
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
     it('should be parseable as valid JSON', () => {
       if (!existsSync(WORKER_SCRIPT)) {
@@ -312,7 +312,7 @@ describe('worker-json-status', () => {
       expect(typeof parsed).toBe('object');
       expect(parsed).not.toBeNull();
       expect(Array.isArray(parsed)).toBe(false);
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
     it('should always include continue: true (required for Claude Code to proceed)', () => {
       if (!existsSync(WORKER_SCRIPT)) {
@@ -326,7 +326,7 @@ describe('worker-json-status', () => {
       expect(parsed.continue).toBe(true);
 
       expect(parsed.continue).toStrictEqual(true);
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
     it('should include suppressOutput: true to hide from transcript mode', () => {
       if (!existsSync(WORKER_SCRIPT)) {
@@ -338,7 +338,7 @@ describe('worker-json-status', () => {
       const parsed = JSON.parse(stdout);
 
       expect(parsed.suppressOutput).toBe(true);
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
     it('should include a valid status field', () => {
       if (!existsSync(WORKER_SCRIPT)) {
@@ -351,6 +351,6 @@ describe('worker-json-status', () => {
 
       expect(parsed).toHaveProperty('status');
       expect(['ready', 'error']).toContain(parsed.status);
-    });
+    }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
   });
 });

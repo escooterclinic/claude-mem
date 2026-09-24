@@ -399,7 +399,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
   beforeEach(async () => {
     await ChromaMcpManager.reset();
     resetState();
-  });
+  }, 30_000); // reset() stops the prior test's subprocess tree: past 1s at load ~7 (measured 2026-09-24), and bun runs hooks under the 5s default, not the test's budget
 
   it('serializes concurrent ensureConnected() calls into one spawn', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -441,7 +441,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     // self-capture on a path where self-capture is guaranteed to be too late.
     expect(cleanupCall!.options).toBeDefined();
     expect(Object.prototype.hasOwnProperty.call(cleanupCall!.options!, 'expectedStartToken')).toBe(true);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('never passes a foreign Python interpreter to the uvx child (#3552)', async () => {
     // Pollute the ambient env exactly as an activated venv / conda shell would.
@@ -478,7 +478,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
         else process.env[key] = value;
       }
     }
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('serializes Chroma mutations while leaving read-only queries responsive', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -536,7 +536,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     await waitForCondition(() => mutationReleases.length === 2);
     mutationReleases[1]();
     await Promise.all([firstMutation, secondMutation]);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('kills the prior subprocess tree before a reconnect spawn', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -564,7 +564,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     // The first transport's pid must have been signaled by killProcessTree
     // before the second transport spawned.
     expect(killTreeCalls).toContain(firstPid);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('ignores kill-triggered onclose while retrying after a transport error', async () => {
     transportKillEmitsOnclose = true;
@@ -586,7 +586,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     expect(transportInstances.length).toBe(2);
     expect(logEntries.some(entry => entry.message === 'chroma-mcp subprocess closed unexpectedly, applying reconnect backoff')).toBe(false);
-  });
+  }, 30_000); // spawns a subprocess: 3.3s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('stop() disposes state including any pending connecting promise', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -605,7 +605,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     // a stale one).
     await mgr.callTool('chroma_list_collections', { limit: 1 });
     expect(transportInstances.length).toBe(2);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('does not reconnect an active mutation after shutdown starts', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -627,7 +627,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     await expect(pendingMutation).rejects.toThrow('call cancelled during shutdown');
     expect(transportInstances.length).toBe(1);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('rejects local mutations that arrive after shutdown without reconnecting', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -654,7 +654,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     await mgr.callTool('chroma_list_collections', { limit: 1 });
     expect(transportInstances.length).toBe(2);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('stop() during a hanging prewarm does not record uvx unavailable or apply reconnect backoff', async () => {
     process.env.CLAUDE_MEM_CHROMA_PREWARM_TIMEOUT_MS = '25';
@@ -685,7 +685,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     expect(prewarmSpawnCalls.length).toBe(2);
     expect(transportInstances.length).toBe(1);
     expect(getDependencyStatus('uvx')).toBeNull();
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('stop() during MCP handshake treats SDK Connection closed rejection as cancellation', async () => {
     rejectPendingConnectOnTransportClose = true;
@@ -713,7 +713,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     await mgr.callTool('chroma_list_collections', { limit: 1 });
 
     expect(transportInstances.length).toBe(2);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('classifies missing uvx before spawning chroma-mcp transport', async () => {
     ChromaMcpManager.setUvxAvailabilityProbeForTesting(() => false);
@@ -785,7 +785,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     await expect(mgr.callTool('chroma_list_collections', { limit: 1 })).rejects.toThrow('connection in backoff');
     expect(prewarmSpawnCalls.length).toBe(1);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('classifies a mid-handshake transport death as ChromaUnavailableError without error-tracking noise', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -807,7 +807,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
       dependency: 'chroma',
       kind: 'vector_search_unavailable',
     });
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('captures a bounded chroma-mcp stderr tail on MCP connect failure', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -825,7 +825,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     expect((stderrTail as string).length).toBeLessThanOrEqual(2048);
     expect(stderrTail).toContain('stderr-tail-marker');
     expect(stderrTail).not.toContain('head-');
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('holds a writer lock for local persistent Chroma and releases it on stop()', async () => {
     const mgr = ChromaMcpManager.getInstance();
@@ -844,7 +844,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
     await mgr.stop();
 
     expect(existsSync(chromaWriterLockPath())).toBe(false);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('keeps the writer lock until unexpected-close tree cleanup finishes', async () => {
     const cleanupStartedForPids: number[] = [];
@@ -875,7 +875,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
       finishCleanup?.();
       killProcessTreeOverride = null;
     }
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('refuses to open a second local writer for a live Chroma data dir owner', async () => {
     writeChromaWriterLock(process.pid, 'other-worker-owner');
@@ -918,7 +918,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     expect(transportInstances.length).toBe(2);
     expect(existsSync(chromaWriterLockPath())).toBe(true);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('replaces an unreadable Chroma writer lock once it is past the write grace period (#3916)', async () => {
     mkdirSync(mockedChromaDir, { recursive: true });
@@ -943,7 +943,7 @@ describe('ChromaMcpManager singleton enforcement (#2313)', () => {
 
     expect(existsSync(chromaWriterLockPath())).toBe(true);
     expect(transportInstances.length).toBe(0);
-  });
+  }, 30_000); // spawns a subprocess: runs past 1s at load ~50 (measured 2026-09-24), past bun's 5s default on a loaded host
 
   it('preserves remote mutation concurrency', async () => {
     mockedSettings = {
