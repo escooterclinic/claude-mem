@@ -18,6 +18,9 @@ plugin/data/
 plugin/data.backup/
 package-lock.json
 bun.lock
+# escooterclinic fork: the root lockfile IS committed, so the committed plugin/ bundles
+# can be rebuilt byte-for-byte (scripts/check-bundles-reproducible.sh).
+!/bun.lock
 !plugin/bun.lock
 !workers/sync-hub/bun.lock
 private/

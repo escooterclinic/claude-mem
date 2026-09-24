@@ -43,6 +43,11 @@ jobs:
       - name: Build (includes bundle-size guardrails)
         run: npm run build
 
+      # escooterclinic fork: the committed plugin/ bundles must equal a frozen
+      # rebuild of this commit from the committed root bun.lock.
+      - name: Bundles reproducible from bun.lock
+        run: scripts/check-bundles-reproducible.sh
+
       # The in-process server-runtime smoke test (tests/server/server-runtime-smoke.test.ts,
       # #2550) runs here with no Docker: it boots the server HTTP surface in
       # process, loads a mode, creates a key, makes an authed request, and
