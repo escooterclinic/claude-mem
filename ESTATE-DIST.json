@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "what": "Built claude-mem bundles carrying the session-start shared-store read fix.",
+  "why_this_branch": "The upstream PR branch stays SOURCE-ONLY so thedotmack/claude-mem#4112 remains a clean, reviewable diff. Built bundles live here instead. This branch is fork-only and must NEVER be proposed upstream.",
+  "upstream_version": "13.26.0",
+  "source_ref": "52d777e6e952903780a912e4d614ebc820e0fc40",
+  "source_branch": "estate/dist (fix 5b7824d5 cherry-picked onto v13.26.0)",
+  "upstream_pr": "https://github.com/thedotmack/claude-mem/pull/4112",
+  "build_command": "npm run build",
+  "built_at_utc": "2026-09-26T07:28:59Z",
+  "artefacts": [
+    {
+      "path": "plugin/scripts/worker-service.cjs",
+      "sha256": "1af8d3a483fa393fa31d34edebffba34b5cf22629714a046aa0c4795f08546fc",
+      "bytes": 2907893
+    },
+    {
+      "path": "plugin/scripts/context-generator.cjs",
+      "sha256": "a4b704076f17eb827a235f474850b6ab5f2c27fb3a6fe36d3084e6f8e327fc09",
+      "bytes": 76867
+    }
+  ],
+  "verify": {
+    "discriminator": ".contextObservations(",
+    "note": "A FIXED bundle CALLS the route; a stock 13.26.0 bundle only DEFINES contextObservations(). The dot is the whole discriminator -- grep for the definition and a stock bundle reads as fixed."
+  },
+  "not_byte_reproducible": "worker-service.cjs differs between builds of the SAME source ref, so a verifier cannot rebuild and compare hashes. Integrity is the sha256 pinned in claude-code-policy, not a rebuild.",
+  "version_guard": "These bundles are built from 13.26.0 ONLY. Installing them into a different plugin version would downgrade that bundle's unrelated code. The converge MUST match upstream_version against the target bundle's version and refuse otherwise."
+}
