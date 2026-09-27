@@ -38,7 +38,7 @@ Actions are `add`, `replace`, and `delete`. An `add` uses `-` for the expected h
 
 ## Generated bundles
 
-Generated bundles do not belong in a manifest. The earlier `estate/dist` branch demonstrated why: source and shipped bundles can diverge. Each overlay's `build.sh` runs the product's existing `npm run build` after source files are applied, so generated files come from the same overlaid source on every application. Generated files are never edited or copied into an overlay.
+Generated bundles do not belong in a manifest. The earlier `estate/dist` branch demonstrated why: source and shipped bundles can diverge. Each overlay's `build.sh` installs dependencies with the upstream Bun toolchain (`bun install`) and runs the product's existing `npm run build` after source files are applied, so generated files come from the same overlaid source on every application. Generated files are never edited or copied into an overlay.
 
 ## Advance the shared base
 
@@ -51,7 +51,7 @@ Generated bundles do not belong in a manifest. The earlier `estate/dist` branch 
 
 ## Decide where a change belongs
 
-- A product correction useful to upstream users goes to an upstream branch and pull request. It stays out of deployment manifests while that request is open. The session-start read-path correction in upstream PR #4112 is such a change.
+- A product correction useful to upstream users goes to an upstream branch and pull request. A deployment may carry a pending fix as a temporary overlay, with its PR and removal condition recorded in the overlay README. The org overlay carries the session-start read-path correction in upstream PR #4112 until upstream merges it.
 - A policy or behavior specific to one deployment goes only in that deployment's manifest and payload tree, with a one-line reason in its README.
 - A deviation shared by both deployments is still a product change candidate. Send a generic change upstream. If upstream would reject it because it expresses local policy, declare it independently in both overlays so each deployment's complete delta remains visible.
 - Deployment values and secrets belong to the deploying repository. They are injected after this source/build step and never committed here.

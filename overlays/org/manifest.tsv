@@ -1,1 +1,4 @@
 # action<TAB>upstream path<TAB>expected upstream sha256<TAB>overlay payload path
+replace	src/services/context/ContextBuilder.ts	da649acf0355372c898bf5870c5ce7df3a6b86e13b04e767b4355b538b8ed1a7	files/src/services/context/ContextBuilder.ts
+replace	src/services/hooks/server-client.ts	5de3fc6b907c0b393f03d3fa06296a4ad296a0ce0ee792a51378fe6b30db6e24	files/src/services/hooks/server-client.ts
+add	tests/context/context-builder-shared-store.test.ts	-	files/tests/context/context-builder-shared-store.test.ts

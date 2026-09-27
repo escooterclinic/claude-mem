@@ -28,8 +28,9 @@ mkdir -p "$TMP/base/config" "$TMP/fixture-overlays/org/files/config" "$TMP/fixtu
 printf 'shared\n' > "$TMP/base/config/runtime.txt"
 printf 'untouched\n' > "$TMP/base/untouched.txt"
 
-# Exercise the committed skeletons against the same base. They intentionally
-# have no deviations yet. A fake npm proves both committed build hooks run
+# Exercise committed build hooks with empty manifests on a minimal base.
+# Product payloads are validated separately against their upstream release.
+# A fake npm proves both committed build hooks run
 # without making this mechanism test perform the full product build twice.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/npm" <<'EOF'
@@ -51,9 +52,22 @@ if [ "${NPM_FAIL:-0}" = 1 ]; then
 fi
 printf 'built\n' > .build-hook-ran
 EOF
-chmod +x "$TMP/bin/npm"
-PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" org "$TMP/base" "$TMP/real-org-result"
-PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" th323 "$TMP/base" "$TMP/real-th323-result"
+cat > "$TMP/bin/bun" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" != "install" ]; then
+  echo "stub bun: unexpected arguments: $*" >&2
+  exit 64
+fi
+exit 0
+EOF
+chmod +x "$TMP/bin/npm" "$TMP/bin/bun"
+for deployment in org th323; do
+  mkdir -p "$TMP/build-overlays/$deployment"
+  cp "$ROOT/overlays/$deployment/build.sh" "$TMP/build-overlays/$deployment/build.sh"
+  : > "$TMP/build-overlays/$deployment/manifest.tsv"
+done
+OVERLAYS_ROOT="$TMP/build-overlays" PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" org "$TMP/base" "$TMP/real-org-result"
+OVERLAYS_ROOT="$TMP/build-overlays" PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" th323 "$TMP/base" "$TMP/real-th323-result"
 assert_file "$TMP/real-org-result/config/runtime.txt" shared
 assert_file "$TMP/real-th323-result/config/runtime.txt" shared
 assert_file "$TMP/real-org-result/.build-hook-ran" built
@@ -62,7 +76,7 @@ assert_absent "$TMP/real-org-result/overlays"
 assert_absent "$TMP/real-th323-result/overlays"
 
 set +e
-build_failure=$(NPM_FAIL=1 PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" org "$TMP/base" "$TMP/build-failure-result" 2>&1)
+build_failure=$(NPM_FAIL=1 OVERLAYS_ROOT="$TMP/build-overlays" PATH="$TMP/bin:$PATH" "$ROOT/overlays/apply.sh" org "$TMP/base" "$TMP/build-failure-result" 2>&1)
 build_failure_exit=$?
 set -e
 [[ $build_failure_exit -ne 0 ]] || fail "build hook failure did not propagate"

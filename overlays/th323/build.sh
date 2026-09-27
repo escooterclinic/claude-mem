@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 tree=$1
-(cd "$tree" && npm run build)
+(cd "$tree" && bun install && npm run build)
