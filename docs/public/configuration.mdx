@@ -1,0 +1,546 @@
+---
+title: "Configuration"
+description: "Environment variables and settings for Claude-Mem"
+---
+
+# Configuration
+
+## Settings File
+
+Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created with defaults on first run.
+
+### Core Settings
+
+| Setting                       | Default                         | Description                           |
+|-------------------------------|---------------------------------|---------------------------------------|
+| `CLAUDE_MEM_MODEL`            | `claude-haiku-4-5-20251001`     | Claude model used to compress observations (when using the Claude provider) |
+| `CLAUDE_MEM_PROVIDER`         | `claude`                        | AI provider: `claude`, `gemini`, or `openrouter` |
+| `CLAUDE_MEM_CLAUDE_AUTH_METHOD` | `subscription`                | Claude provider auth mode: `subscription`, `api-key`, or `gateway` |
+| `CLAUDE_MEM_MODE`             | `code`                          | Active mode profile (e.g., `code--es`, `email-investigation`) |
+| `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `50`                        | Number of observations to inject      |
+| `CLAUDE_MEM_WORKER_PORT`      | `37700 + (uid % 100)`           | Worker service port (per-user default; override for fixed port) |
+| `CLAUDE_MEM_WORKER_HOST`      | `127.0.0.1`                     | Worker service host address           |
+| `CLAUDE_MEM_TV_TOKEN`         | —                               | Shared secret for Observation TV remote access. Empty = off. With a non-loopback `CLAUDE_MEM_WORKER_HOST`, only `/tv`, `/tv.html`, `/stream` and `GET /api/observations` are reachable, and only with this token. |
+| `CLAUDE_MEM_DATA_DIR`         | `~/.claude-mem`                 | Data root — every other path (database, chroma, logs, settings.json, worker.pid) derives from this |
+| `CLAUDE_MEM_SKIP_TOOLS`       | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | Comma-separated tools to exclude from observations |
+
+### Gemini Provider Settings
+
+| Setting                       | Default                         | Description                           |
+|-------------------------------|---------------------------------|---------------------------------------|
+| `CLAUDE_MEM_GEMINI_API_KEY`   | —                               | Gemini API key ([get free key](https://aistudio.google.com/app/apikey)) |
+| `CLAUDE_MEM_GEMINI_MODEL`     | `gemini-flash-latest`          | Gemini model: `gemini-flash-latest`, `gemini-flash-lite-latest`, `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview` |
+
+See [Gemini Provider](usage/gemini-provider) for detailed configuration and rate-limit information.
+
+### OpenRouter Provider Settings
+
+| Setting                                      | Default                     | Description                           |
+|----------------------------------------------|-----------------------------|---------------------------------------|
+| `CLAUDE_MEM_OPENROUTER_API_KEY`              | —                           | OpenRouter API key ([get key](https://openrouter.ai/keys)) |
+| `CLAUDE_MEM_OPENROUTER_MODEL`                | `xiaomi/mimo-v2-flash:free` | Model identifier (supports 100+ models) |
+| `CLAUDE_MEM_OPENROUTER_SITE_URL`             | —                           | Optional: URL for analytics           |
+| `CLAUDE_MEM_OPENROUTER_APP_NAME`             | `claude-mem`                | Optional: App name for analytics      |
+
+See [OpenRouter Provider](usage/openrouter-provider) for detailed configuration, free model list, and usage guide.
+
+### Claude Gateway Settings
+
+Gateway credentials live in `~/.claude-mem/.env`, not `settings.json`.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `ANTHROPIC_BASE_URL` | none | LiteLLM or Anthropic-compatible gateway URL for the Claude Agent SDK path |
+| `ANTHROPIC_AUTH_TOKEN` | none | Optional LiteLLM master key or virtual key |
+| `ANTHROPIC_API_KEY` | none | Direct Anthropic API key; normally omit this in LiteLLM gateway mode |
+
+Use [LiteLLM Gateway](configuration/litellm-gateway) when you want `CLAUDE_MEM_PROVIDER=claude` to route through LiteLLM while preserving the Claude Agent SDK worker path.
+
+### System Configuration
+
+| Setting                       | Default                         | Description                           |
+|-------------------------------|---------------------------------|---------------------------------------|
+| `CLAUDE_MEM_DATA_DIR`         | `~/.claude-mem`                 | Data directory location               |
+| `CLAUDE_MEM_LOG_LEVEL`        | `INFO`                          | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
+| `CLAUDE_MEM_FETCH_VERBOSE`    | _(unset / off)_                 | Opt-in worker-IPC `fetch()` diagnostics (`1`/`true`/`on`/`yes`). Passes Node/undici `{ verbose: true }` and writes the error cause chain on socket-level hook failures. Default stays off. |
+| `CLAUDE_MEM_PYTHON_VERSION`   | `3.13`                          | Python version for chroma-mcp         |
+| `CLAUDE_CODE_PATH`            | _(auto-detect)_                 | Path to Claude Code CLI (for Windows). File/env only — not writable via the viewer HTTP API. |
+| `CLAUDE_MEM_CLAUDE_CONFIG_DIR`| _(unset — falls through to `CLAUDE_CONFIG_DIR`/`~/.claude`)_ | Override which `CLAUDE_CONFIG_DIR` profile's OAuth keychain entry to read, and which `CLAUDE_CONFIG_DIR` the spawned SDK subprocess sees. For running multiple named Claude Code profiles (e.g. `~/.claude-profiles/<name>`, each logged in separately) side by side on one machine. macOS only for the keychain lookup; Windows/Linux credential stores are not profile-aware yet. |
+
+## Model Configuration
+
+Configure which Claude model compresses your observations (only applies when `CLAUDE_MEM_PROVIDER=claude`).
+
+### Available Models
+
+| Value | Notes |
+|-------|-------|
+| `claude-haiku-4-5-20251001` | Default — fastest, ideal for compression |
+| `claude-sonnet-5` | Balanced quality and speed |
+| `claude-opus-4-8` | Highest quality (slowest) |
+
+### Picking via the Installer
+
+`npx claude-mem install` prompts for the Claude model (when the Claude provider is selected) and persists the choice to `~/.claude-mem/settings.json`.
+
+### Manual Configuration
+
+Edit `~/.claude-mem/settings.json`:
+
+```json
+{
+  "CLAUDE_MEM_MODEL": "claude-haiku-4-5-20251001"
+}
+```
+
+## Mode Configuration
+
+Configure the active workflow mode and language.
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CLAUDE_MEM_MODE` | `code` | Defines behavior and language. See [Modes & Languages](modes). |
+
+### Examples
+
+**Spanish Code Mode:**
+```json
+{
+  "CLAUDE_MEM_MODE": "code--es"
+}
+```
+
+**Email Investigation Mode:**
+```json
+{
+  "CLAUDE_MEM_MODE": "email-investigation"
+}
+```
+
+## Files and Directories
+
+### Data Directory Structure
+
+The data directory location depends on the environment:
+- **Production (installed plugin)**: `~/.claude-mem/` (always, regardless of CLAUDE_PLUGIN_ROOT)
+- **Development**: Can be overridden with `CLAUDE_MEM_DATA_DIR`
+
+```
+~/.claude-mem/
+├── claude-mem.db           # SQLite database
+├── .install-version        # Version marker written by `npx claude-mem install`/`repair`
+├── settings.json           # Worker port + provider/model settings
+└── logs/
+    ├── worker-out.log      # Worker stdout logs
+    └── worker-error.log    # Worker stderr logs
+```
+
+### Plugin Directory Structure
+
+```
+${CLAUDE_PLUGIN_ROOT}/
+├── .claude-plugin/
+│   └── plugin.json         # Plugin metadata
+├── .mcp.json               # MCP server configuration
+├── hooks/
+│   └── hooks.json          # Hook configuration
+├── scripts/                # Built executables
+│   ├── version-check.js    # Sub-100ms Setup-hook version marker check
+│   ├── context-hook.js     # Context injection hook
+│   ├── new-hook.js         # Session creation hook
+│   ├── save-hook.js        # Observation capture hook
+│   ├── summary-hook.js     # Summary generation hook
+│   ├── worker-service.cjs  # Worker service (CJS)
+│   └── mcp-server.cjs      # MCP search server (CJS)
+└── ui/
+    └── viewer.html         # Web viewer UI bundle
+```
+
+## Plugin Configuration
+
+### Hooks Configuration
+
+Hooks are registered in `plugin/hooks/hooks.json`. The current shape uses a single dispatcher (`worker-service.cjs hook claude-code <event>`) launched through `bun-runner.js`, plus a fast Setup-phase `version-check.js`. The events wired up are:
+
+- `Setup` → `version-check.js` (sub-100ms `.install-version` check)
+- `SessionStart` → start the worker, then `hook claude-code context` (context injection)
+- `UserPromptSubmit` → `hook claude-code session-init`
+- `PreToolUse` (matcher `Read`) → `hook claude-code file-context`
+- `PostToolUse` (matcher `*`) → `hook claude-code observation`
+- `Stop` → `hook claude-code summarize`
+
+The exact `hooks.json` entries are written by the installer; do not hand-edit them in the marketplace copy unless you know what you're doing.
+
+### Search Configuration
+
+Claude-Mem provides MCP search tools for querying your project history.
+
+**No configuration required** - MCP tools are automatically available in Claude Code sessions.
+
+Search operations are provided via:
+- **MCP Server**: 3 tools (search, timeline, get_observations) with progressive disclosure
+- **HTTP API**: 10 endpoints on the worker service port (per-user, default `37700 + (uid % 100)`; see `~/.claude-mem/settings.json`)
+- **Auto-Invocation**: Claude recognizes natural language queries about past work
+
+## Worker Service Management
+
+Worker service is managed by Bun as a background process. The worker auto-starts on first session and runs continuously in the background.
+
+### Observation TV Remote Access
+
+The worker binds to `127.0.0.1` by default and has **no request authentication** — the loopback bind is its only defence. `CLAUDE_MEM_TV_TOKEN` adds a read-only broadcast surface so a second device on your LAN (a phone, an iPad, a spare monitor) can watch Observation TV and do nothing else.
+
+Mint a token:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+The host setting and the token work as a pair:
+
+| `CLAUDE_MEM_WORKER_HOST` | `CLAUDE_MEM_TV_TOKEN` | Result |
+|---|---|---|
+| `127.0.0.1` (default) | empty | Today. Nothing reachable off-box. **Recommended for everyone not using the TV remotely.** |
+| `127.0.0.1` | set | Token is inert — nothing can reach the port anyway. Harmless. |
+| `0.0.0.0` | **empty** | **Dangerous, and unchanged from today**: the full API — settings incl. provider API keys, deletes, import, better-auth — is on the LAN. This is what the Docker setup already tells people to do, so the worker warns rather than refuses to bind. |
+| `0.0.0.0` | set | The point of the feature. LAN devices reach `/tv`, `/tv.html`, `/stream`, `GET /api/observations` with the secret, and get 404/403/401 for everything else. |
+
+Booting with a non-loopback host and no token logs a `SECURITY` warning; the worker still binds.
+
+**A local port-forward reopens the whole API.** The guard exempts loopback by socket peer, so anything that arrives *as* loopback bypasses it entirely — including `ssh -L <port>:127.0.0.1:<port> <box>` from another device, or any local forwarding proxy. To the worker that traffic is indistinguishable from the operator's own browser, so it gets the full API, `GET /api/settings` and its provider API keys included. This is the one concrete way "the device can do nothing else" stops being true: only forward the port to devices you would hand the machine to.
+
+**Docker and bridge networking.** With `CLAUDE_MEM_WORKER_HOST=0.0.0.0` inside a bridge-network container, requests from the host's own browser arrive from the bridge gateway address, not `127.0.0.1`. Once a token is set, that browser is treated as remote like any other device and must supply `?token=` to open the TV — and the React viewer at `/` is denied outright, exactly as it is for any other remote device.
+
+Open the TV on the second device at `http://<lan-ip>:<port>/tv.html?token=<secret>`.
+
+**The React viewer at `/` stops working remotely when a token is set.** That is intended — the viewer needs the write and settings routes the guard denies. Loopback is never gated, so the viewer keeps working normally on the machine running the worker.
+
+**Treat the URL as the secret.** The token rides in the query string for `/stream` because the browser's `EventSource` API cannot set request headers. It is *not* written to the worker log (the request logger records `req.path`, which excludes the query string), but it **will** be in the browser's history on the device you open it on. `Authorization: Bearer <token>` and `X-Api-Key: <token>` also work for anything that can set headers.
+
+**This is plain HTTP.** The token stops an unauthenticated device from reading the stream; it does not encrypt it. Anyone who can sniff your LAN sees observation titles. For a home network that is the accepted tradeoff; for anything else, terminate TLS in front of the worker (out of scope here) — and still never a tunnel to the unmodified worker, which would publish `GET /api/settings` and its provider API keys to the open internet.
+
+**Use the exact paths.** The allowlist is exact-match and case-sensitive: `/tv.html`, `/tv`, `/stream`, `/api/observations` and nothing else. A trailing slash or a different case — `/tv/`, `/API/observations`, `/api/observations/by-file` — returns 404 even with a valid token. That is deliberate fail-closed behavior, not a bug.
+
+The TV's `?project=` and `?source=` filters are **client-side only**. They are display filters, not access control — a token holder still receives every project's observations.
+
+Accepted risks, stated plainly:
+
+1. **`GET /api/observations` returns full observation bodies** — `narrative`, `facts`, `text`, `files_read`, `files_modified` — for **every project on the box**, not just the four fields the TV renders. A token holder can page through the entire memory database with `offset`.
+2. **`/stream` is unfiltered.** It carries every observation for every project on the box, plus the project catalog and processing status. There is no per-client filtering.
+3. **No rate limiting.** A token holder can hammer `GET /api/observations` freely.
+4. **The token is readable on loopback** via `GET /api/settings`, exactly like your provider API keys are today. It is deliberately *not* writable through `POST /api/settings` (that route is unauthenticated), so it can only be set by someone with filesystem or environment access.
+5. **`/stream` is not side-effect-free.** Every new connection triggers an `initial_load` broadcast to *all* connected clients, and the client list is unbounded. A token holder reconnecting in a loop can therefore disturb the operator's own local viewer. This is pre-existing worker behavior; the token is what newly makes it reachable from the LAN.
+
+### Manual Configuration
+
+Edit `~/.claude-mem/settings.json`:
+
+```json
+{
+  "CLAUDE_MEM_WORKER_HOST": "0.0.0.0",
+  "CLAUDE_MEM_TV_TOKEN": "your-minted-token"
+}
+```
+
+Then restart the worker:
+```bash
+npm run worker:restart
+```
+
+### Watching Off-LAN (cmem.ai Pro)
+
+Everything above is the LAN path. Watching from *outside* your network — on cellular, at a coffee shop, from another house — is a **cmem.ai Pro** feature: open `https://cmem.ai/tv` in any browser while signed in to your account. It requires [Cloud Sync](/cloud-sync) to be enabled, because the hosted page reads titles your worker has already pushed to your sync hub.
+
+**No token, no open port, no inbound connection.** This path needs neither `CLAUDE_MEM_TV_TOKEN` nor a non-loopback `CLAUDE_MEM_WORKER_HOST` — both belong to the LAN path and have no effect on it, so leave them at their defaults. The box never accepts an inbound connection for the hosted TV; the worker only ever dials out. No tunnel (cloudflared, ngrok, or anything like them) is needed, and none is recommended.
+
+**The hosted TV surface shows observation titles and nothing else.** It never renders narratives, facts, file lists, snippets or prompt text.
+
+**That is not the same as "only titles leave your machine."** The hosted TV is a feature *of* cloud sync, and cloud sync uploads your observation narratives and your full prompt text to the sync hub under your cmem.ai account. The hosted page is titles-only; the upload standing behind it is not. Don't enable cloud sync if that content must stay on your machine.
+
+**One rendering difference.** An observation with no title still appears on the LAN TV, which falls back to the subtitle. It does not appear on the hosted phone TV — that surface receives titles only, so it has no subtitle to fall back to.
+
+## Folder Context Files
+
+Claude-mem can automatically generate `CLAUDE.md` files in your project folders with activity timelines. This feature is disabled by default.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED` | `false` | Enable auto-generation of folder CLAUDE.md files |
+
+## Grok Bot live INDEX
+
+The worker writes a growing observation INDEX into each Grok Bot seat’s Memory mid-attach file (`agents/<uuid>/memory/log/zz-claude-mem-inject.md`). See [Grok Bot Integration](/grok-bot).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CLAUDE_MEM_GROK_BOT_INJECT_ENABLED` | `true` | Live-write the INDEX. `false` disables it. No-op when no Grok Bot seats exist. |
+| `CLAUDE_MEM_GROK_BOT_INJECT_AGENT_IDS` | `*` | `*` / `all` / empty = every live seat; or a comma-separated UUID list. |
+| `CLAUDE_MEM_GROK_BOT_INJECT_FALLBACK` | `house` | `house` fills thin seat diaries from newest worker observations. `off` = seat project only. |
+| `CLAUDE_MEM_GROK_BOT_INJECT_TIER` | `episode` | Memory rank prefix (`episode`, `plain`, `note`). |
+| `CLAUDE_MEM_GROK_BOT_INJECT_WINDOW` | `80` | Newest INDEX rows to keep (max 100). |
+| `CLAUDE_MEM_GROK_BOT_INJECT_PLATFORM_SOURCE` | — | Optional host filter. Leave empty unless you want grok-only rows. |
+| `CLAUDE_MEM_GROK_BOT_INJECT_PROJECTS_BY_AGENT` | — | Optional `uuid=projA,projB;uuid2=projC` override of transcript-watch projects. |
+
+See [Folder Context Files](usage/folder-context) for full documentation on how this feature works, configuration options, and git integration recommendations.
+
+## Context Injection Configuration
+
+Claude-Mem injects past observations into each new session, giving Claude awareness of recent work. You can configure exactly what gets injected using the **Context Settings Modal**.
+
+### Context Settings Modal
+
+Access the settings modal from the web viewer. The worker prints its URL on startup; the port comes from `CLAUDE_MEM_WORKER_PORT`.
+
+1. Click the **gear icon** in the header
+2. Adjust settings in the right panel
+3. See changes reflected live in the **Terminal Preview** on the left
+4. Settings auto-save as you change them
+
+The Terminal Preview shows exactly what will be injected at the start of your next Claude Code session for the selected project.
+
+### Loading Settings
+
+Control how many observations are injected:
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| **Observations** | 50 | 1-200 | Total number of recent observations to include |
+| **Sessions** | 10 | 1-50 | Number of recent sessions to pull observations from |
+
+**Considerations**:
+- **Higher values** = More context but slower SessionStart and more tokens used
+- **Lower values** = Faster SessionStart but less historical awareness
+- Default of 50 observations from 10 sessions balances context richness with performance
+
+### Filter Settings
+
+Control which observation types and concepts are included:
+
+**Types** (select any combination):
+- `bugfix` - Bug fixes and error resolutions
+- `feature` - New functionality additions
+- `refactor` - Code restructuring
+- `discovery` - Learnings about how code works
+- `decision` - Architectural or design decisions
+- `change` - General code changes
+
+**Concepts** (select any combination):
+- `how-it-works` - System behavior explanations
+- `why-it-exists` - Rationale for code/design
+- `what-changed` - Change summaries
+- `problem-solution` - Problem/solution pairs
+- `gotcha` - Edge cases and pitfalls
+- `pattern` - Recurring patterns
+- `trade-off` - Design trade-offs
+
+Use "All" or "None" buttons to quickly select/deselect all options.
+
+### Display Settings
+
+Control how observations appear in the context:
+
+**Full Observations**:
+| Setting | Default | Options | Description |
+|---------|---------|---------|-------------|
+| **Count** | 5 | 0-20 | How many observations show expanded details |
+| **Field** | narrative | narrative, facts | Which field to expand |
+
+The most recent N observations (set by Count) show their full narrative or facts. Remaining observations show only title, type, and token counts in a compact table format.
+
+**Token Economics** (toggles):
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Read cost** | true | Show tokens to read each observation |
+| **Work investment** | true | Show tokens spent creating the observation |
+| **Savings** | true | Show total tokens saved by reusing context |
+
+Token economics help you understand the value of cached observations vs. re-reading files.
+
+### Advanced Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Model** | sonnet | AI model for generating observations |
+| **Worker Port** | `37700 + (uid % 100)` | Port for background worker service (override with `CLAUDE_MEM_WORKER_PORT`) |
+| **MCP search server** | true | Enable Model Context Protocol search tools |
+| **Include last summary** | false | Add previous session's summary to context |
+| **Include last message** | false | Add previous session's final message |
+
+### Manual Configuration
+
+Settings are stored in `~/.claude-mem/settings.json`:
+
+```json
+{
+  "CLAUDE_MEM_CONTEXT_OBSERVATIONS": "100",
+  "CLAUDE_MEM_CONTEXT_SESSION_COUNT": "20",
+  "CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES": "bugfix,decision,discovery",
+  "CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS": "how-it-works,gotcha",
+  "CLAUDE_MEM_CONTEXT_FULL_COUNT": "10",
+  "CLAUDE_MEM_CONTEXT_FULL_FIELD": "narrative",
+  "CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS": "true",
+  "CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS": "true",
+  "CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT": "true",
+  "CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY": "false",
+  "CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE": "false"
+}
+```
+
+**Note**: The Context Settings Modal (in the web viewer) is the recommended way to configure these settings, as it provides live preview of changes.
+
+## Customization
+
+Settings can be customized in `~/.claude-mem/settings.json`.
+
+### Custom Data Directory
+
+Edit `~/.claude-mem/settings.json`:
+```json
+{
+  "CLAUDE_MEM_DATA_DIR": "/custom/path"
+}
+```
+
+### Custom Worker Port
+
+Edit `~/.claude-mem/settings.json`:
+```json
+{
+  "CLAUDE_MEM_WORKER_PORT": "38000"
+}
+```
+
+Then restart the worker:
+```bash
+npm run worker:restart
+```
+
+### Custom Model
+
+Edit `~/.claude-mem/settings.json`:
+```json
+{
+  "CLAUDE_MEM_MODEL": "opus"
+}
+```
+
+Then restart the worker:
+```bash
+export CLAUDE_MEM_MODEL=opus
+npm run worker:restart
+```
+
+### Custom Skip Tools
+
+Control which tools are excluded from observations. Edit `~/.claude-mem/settings.json`:
+```json
+{
+  "CLAUDE_MEM_SKIP_TOOLS": "ListMcpResourcesTool,SlashCommand,Skill"
+}
+```
+
+**Default excluded tools:**
+- `ListMcpResourcesTool`
+- `SlashCommand`
+- `Skill`
+- `TodoWrite`
+- `AskUserQuestion`
+
+**Common customizations:**
+- Include TodoWrite: Remove from skip list to track task planning
+- Include AskUserQuestion: Remove to capture decision-making conversations
+- Skip additional tools: Add tool names to reduce observation noise
+
+Changes take effect on the next tool execution (no worker restart needed).
+
+## Advanced Configuration
+
+### Hook Timeouts
+
+Hook timeouts are written into `plugin/hooks/hooks.json` by the installer. The current defaults match the shape of the workload at each lifecycle stage:
+
+- Setup (`version-check.js`): 300s ceiling but normally < 100ms — only reads `.install-version`
+- SessionStart (worker-start + context): 60s
+- UserPromptSubmit: 60s
+- PreToolUse (file-context, Read matcher): 60s
+- PostToolUse (observation): 120s
+- Stop (summary): 120s
+
+The Setup hook never installs anything — runtime install (Bun, uv, `bun install`) happens in `npx claude-mem install` / `npx claude-mem repair` outside the session lifecycle.
+
+### Worker Memory Limit
+
+The worker service is managed by Bun and will automatically restart if it encounters issues. Memory usage is typically low (~100-200MB).
+
+### Logging Verbosity
+
+Enable debug logging:
+
+```bash
+export DEBUG=claude-mem:*
+npm run worker:restart
+npm run worker:logs
+```
+
+## Configuration Best Practices
+
+1. **Use defaults**: Default configuration works for most use cases
+2. **Override selectively**: Only change what you need
+3. **Document changes**: Keep track of custom configurations
+4. **Test after changes**: Verify worker restarts successfully
+5. **Monitor logs**: Check worker logs after configuration changes
+
+## Troubleshooting Configuration
+
+### Configuration Not Applied
+
+1. Restart worker after changes:
+   ```bash
+   npm run worker:restart
+   ```
+
+2. Verify environment variables:
+   ```bash
+   echo $CLAUDE_MEM_MODEL
+   echo $CLAUDE_MEM_WORKER_PORT
+   ```
+
+3. Check worker logs:
+   ```bash
+   npm run worker:logs
+   ```
+
+### Invalid Model Name
+
+If you specify an invalid Claude model name, the worker logs a warning and uses the default. Valid Claude models for `CLAUDE_MEM_MODEL`:
+
+- `claude-haiku-4-5-20251001` (default)
+- `claude-sonnet-5`
+- `claude-opus-4-8`
+
+### Port Already in Use
+
+The default worker port is `37700 + (uid % 100)`, so different OS users on the same machine get different ports automatically. If you still hit a collision (e.g. running multiple profiles as the same UID), set a fixed port:
+
+1. Set custom port:
+   ```bash
+   export CLAUDE_MEM_WORKER_PORT=38000
+   ```
+
+2. Restart worker:
+   ```bash
+   npm run worker:restart
+   ```
+
+3. Verify new port:
+   ```bash
+   curl -s http://127.0.0.1:$CLAUDE_MEM_WORKER_PORT/api/health | jq .port
+   ```
+
+## Next Steps
+
+- [Architecture Overview](architecture/overview) - Understand the system
+- [Troubleshooting](troubleshooting) - Common issues
+- [Development](development) - Building from source
