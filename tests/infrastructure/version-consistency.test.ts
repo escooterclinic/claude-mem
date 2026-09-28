@@ -1,0 +1,111 @@
+import { describe, it, expect } from 'bun:test';
+import { readFileSync, existsSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, '../..');
+
+describe('Version Consistency', () => {
+  let rootVersion: string;
+
+  it('should read version from root package.json', () => {
+    const packageJsonPath = path.join(projectRoot, 'package.json');
+    expect(existsSync(packageJsonPath)).toBe(true);
+    
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+    expect(packageJson.version).toBeDefined();
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/);
+    
+    rootVersion = packageJson.version;
+  });
+
+  it('should have matching version in plugin/package.json', () => {
+    const pluginPackageJsonPath = path.join(projectRoot, 'plugin/package.json');
+    expect(existsSync(pluginPackageJsonPath)).toBe(true);
+    
+    const pluginPackageJson = JSON.parse(readFileSync(pluginPackageJsonPath, 'utf-8'));
+    expect(pluginPackageJson.version).toBe(rootVersion);
+  });
+
+  it('should have matching version in plugin/.claude-plugin/plugin.json', () => {
+    const pluginJsonPath = path.join(projectRoot, 'plugin/.claude-plugin/plugin.json');
+    expect(existsSync(pluginJsonPath)).toBe(true);
+    
+    const pluginJson = JSON.parse(readFileSync(pluginJsonPath, 'utf-8'));
+    expect(pluginJson.version).toBe(rootVersion);
+  });
+
+  it('should have matching version in .claude-plugin/marketplace.json', () => {
+    const marketplaceJsonPath = path.join(projectRoot, '.claude-plugin/marketplace.json');
+    expect(existsSync(marketplaceJsonPath)).toBe(true);
+    
+    const marketplaceJson = JSON.parse(readFileSync(marketplaceJsonPath, 'utf-8'));
+    expect(marketplaceJson.plugins).toBeDefined();
+    expect(marketplaceJson.plugins.length).toBeGreaterThan(0);
+    
+    const claudeMemPlugin = marketplaceJson.plugins.find((p: any) => p.name === 'claude-mem');
+    expect(claudeMemPlugin).toBeDefined();
+    expect(claudeMemPlugin.version).toBe(rootVersion);
+  });
+
+
+  for (const pluginPath of [
+    'claude-mem-cursor/.cursor-plugin/plugin.json',
+    'claude-mem-grok-bot/.cursor-plugin/plugin.json',
+  ]) {
+    it(`should have matching version in ${pluginPath}`, () => {
+      const manifestPath = path.join(projectRoot, pluginPath);
+      expect(existsSync(manifestPath)).toBe(true);
+
+      const pluginJson = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      expect(pluginJson.version).toBe(rootVersion);
+    });
+  }
+
+  it('should list both cursor marketplace plugin sources', () => {
+    const marketplaceJsonPath = path.join(projectRoot, '.cursor-plugin', 'marketplace.json');
+    expect(existsSync(marketplaceJsonPath)).toBe(true);
+
+    const marketplaceJson = JSON.parse(readFileSync(marketplaceJsonPath, 'utf-8'));
+    expect(marketplaceJson.plugins.map((plugin: any) => plugin.name)).toEqual([
+      'claude-mem-cursor',
+      'claude-mem-grok-bot',
+    ]);
+  });
+
+  for (const bundle of ['worker-service.cjs', 'mcp-server.cjs', 'server-service.cjs', 'transcript-watcher.cjs']) {
+    it(`should have the release version injected into built ${bundle}`, () => {
+      const bundlePath = path.join(projectRoot, 'plugin/scripts', bundle);
+      expect(existsSync(bundlePath)).toBe(true);
+      const content = readFileSync(bundlePath, 'utf-8');
+      expect(content.includes(`"${rootVersion}"`)).toBe(true);
+    });
+  }
+
+  it('should validate version format is semver compliant', () => {
+    expect(rootVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    
+    const [major, minor, patch] = rootVersion.split('.').map(Number);
+    expect(major).toBeGreaterThanOrEqual(0);
+    expect(minor).toBeGreaterThanOrEqual(0);
+    expect(patch).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('Build Script Version Handling', () => {
+  it('should read version from package.json in build-hooks.js', () => {
+    const buildScriptPath = path.join(projectRoot, 'scripts/build-hooks.js');
+    expect(existsSync(buildScriptPath)).toBe(true);
+    
+    const buildScriptContent = readFileSync(buildScriptPath, 'utf-8');
+    
+    expect(buildScriptContent).toContain("readFileSync('package.json'");
+    expect(buildScriptContent).toContain('packageJson.version');
+    
+    expect(buildScriptContent).toContain('version: version');
+    
+    expect(buildScriptContent).toContain('__DEFAULT_PACKAGE_VERSION__');
+    expect(buildScriptContent).toContain('`"${version}"`');
+  });
+});
