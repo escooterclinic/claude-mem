@@ -60,6 +60,10 @@ export interface ServerClientConfig {
   timeoutMs?: number;
 }
 
+export interface ServerRequestOptions {
+  timeoutMs?: number;
+}
+
 export interface ServerStartSessionRequest {
   projectId: string;
   externalSessionId?: string | null;
@@ -183,6 +187,11 @@ export interface ServerContextObservationsRequest {
   query?: string;
   limit?: number;
   platformSource?: string | null;
+  // Folder labels (observations.metadata.project) to scope the read to. Omitted
+  // or empty means every folder in the server project.
+  folderProjects?: string[];
+  // Leave out rows generated from subagent events (CLAUDE_MEM_CONTEXT_MAIN_AGENT_ONLY).
+  excludeSubagents?: boolean;
 }
 
 export interface ServerContextObservationsResponse {
@@ -215,9 +224,12 @@ export class ServerClient {
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
-  async startSession(input: ServerStartSessionRequest): Promise<ServerStartSessionResponse> {
+  async startSession(
+    input: ServerStartSessionRequest,
+    options: ServerRequestOptions = {},
+  ): Promise<ServerStartSessionResponse> {
     const body = this.buildStartSessionPayload(input);
-    return this.request<ServerStartSessionResponse>('POST', '/v1/sessions/start', body);
+    return this.request<ServerStartSessionResponse>('POST', '/v1/sessions/start', body, options);
   }
 
   async recordEvent(input: ServerRecordEventRequest): Promise<ServerRecordEventResponse> {
@@ -263,10 +275,13 @@ export class ServerClient {
     );
   }
 
-  // Phase 8 — MCP `observation_context`. Same FTS surface as search, but
-  // returns a pre-joined context string suitable for direct prompt injection.
+  // Phase 8 — MCP `observation_context` and the server-runtime session-start
+  // read. With a query this is the same FTS surface as search; without one the
+  // route returns the most recent rows. Either way it also returns a pre-joined
+  // context string.
   async contextObservations(
     input: ServerContextObservationsRequest,
+    options: ServerRequestOptions = {},
   ): Promise<ServerContextObservationsResponse> {
     // Built here rather than through buildSearchPayload(): that helper is the
     // /v1/search contract, where a query is genuinely required, and widening it
@@ -277,7 +292,11 @@ export class ServerClient {
     if (input.platformSource !== undefined) {
       payload.platformSource = normalizePlatformSourceField(input.platformSource);
     }
-    return this.request<ServerContextObservationsResponse>('POST', '/v1/context', payload);
+    if (input.folderProjects && input.folderProjects.length > 0) {
+      payload.folderProjects = input.folderProjects;
+    }
+    if (input.excludeSubagents !== undefined) payload.excludeSubagents = input.excludeSubagents;
+    return this.request<ServerContextObservationsResponse>('POST', '/v1/context', payload, options);
   }
 
   // Phase 8 — MCP `observation_generation_status`. Server returns the same
@@ -296,21 +315,29 @@ export class ServerClient {
   buildAddObservationPayload(
     input: ServerAddObservationRequest,
   ): Record<string, unknown> {
-    // Write-path contract (#2684): /v1/memories persists a `memory_items` row
-    // whose searchable text lives in `narrative` (the FTS trigger copies it
-    // into memory_items_fts). The MCP `observation_add` surface speaks in terms
-    // of `content`; map it onto `narrative` so the row is never empty and the
-    // FTS index always has something to match. `type` is REQUIRED by
-    // CreateMemoryItemSchema; default it from `kind` so a manual insert that
-    // only supplied content still persists instead of 400-ing.
+    // Write-path contract. This client is constructed ONLY on the `server`
+    // runtime (runtime-selector.ts `buildServerContext`), so the only
+    // /v1/memories it can ever reach is ServerV1PostgresRoutes, which validates
+    // `content: z.string().min(1)` and writes an `observations` row through
+    // PostgresObservationRepository.
+    //
+    // It previously mapped `content` onto `narrative` and added `type`, citing
+    // #2684 / CreateMemoryItemSchema / `memory_items`. That is the contract of
+    // the OTHER /v1/memories — ServerV1Routes, the SQLite route mounted by
+    // worker-service — which this client never talks to: the `worker` runtime
+    // returns before a ServerClient is built. `memory_items` does not exist in
+    // the server database at all.
+    //
+    // Observed on a live `server` runtime: every MCP `observation_add`
+    // returned 400 ValidationError "path":["content"], so the direct-write
+    // surface was unusable rather than merely untested.
     const content = input.content;
     const kind = input.kind ?? 'manual';
     const metadataTitle = typeof input.metadata?.title === 'string' ? input.metadata.title : undefined;
     return {
       projectId: input.projectId,
       kind,
-      type: kind,
-      narrative: content,
+      content,
       ...(metadataTitle ? { title: metadataTitle } : {}),
       ...(input.serverSessionId !== undefined ? { serverSessionId: input.serverSessionId } : {}),
       // Forward the in-session identifiers so the server can resolve the
@@ -362,6 +389,7 @@ export class ServerClient {
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
+    options: ServerRequestOptions = {},
   ): Promise<T> {
     if (!this.apiKey || !this.apiKey.trim()) {
       throw new ServerClientError(
@@ -383,8 +411,9 @@ export class ServerClient {
     }
 
     let response: Response;
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     try {
-      response = await fetchWithTimeout(url, init, this.timeoutMs);
+      response = await fetchWithTimeout(url, init, timeoutMs);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       const isTimeout = /timed out|timeout/i.test(message);
