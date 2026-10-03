@@ -146,14 +146,23 @@ def advance(args, status, temp):
     previous = version("v" + status["published"]) if status["published"] else (-1, -1, -1)
     status["releases_behind"] = sum(version(tag) > previous for tag in tags)
     if previous == version(latest):
-        status.update(ok=True, stage="up-to-date")
-        return 3
+        # Up to date means the published tree carries THIS overlay, not merely this upstream
+        # version. MEASURED 2026-10-03: an org overlay change merged on v13.29.0 was reported
+        # "up-to-date" and never published, because only the version was compared. The commit
+        # message records the manifest digest it was built from, so compare that too.
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        message = run("git", "-C", str(repo), "log", "-1", "--format=%B", tip)
+        if f"manifest sha256 {digest}" in message:
+            status.update(ok=True, stage="up-to-date")
+            return 3
+        return prepare(repo, overlay, manifest, latest, tip, args, status, temp,
+                       tag_suffix=f"-overlay-{digest[:12]}")
     if previous > version(latest):
         raise ValueError("published version is newer than upstream; refusing downgrade")
     return prepare(repo, overlay, manifest, latest, tip, args, status, temp)
 
 
-def prepare(repo, overlay, manifest, latest, tip, args, status, temp):
+def prepare(repo, overlay, manifest, latest, tip, args, status, temp, tag_suffix=""):
     tree, out = temp / "upstream", temp / "output"
     extract(repo, latest, tree)
     status["stage"] = "overlay-review"
@@ -173,7 +182,7 @@ def prepare(repo, overlay, manifest, latest, tip, args, status, temp):
         status.update(ok=True, stage="dry-run")
         return 0
     run("git", "-C", str(repo), "push", "--atomic", args.publish_url,
-        f"{commit}:refs/heads/{args.publish_branch}", f"{commit}:refs/tags/{args.deployment}/{latest}")
+        f"{commit}:refs/heads/{args.publish_branch}", f"{commit}:refs/tags/{args.deployment}/{latest}{tag_suffix}")
     status.update(ok=True, stage="published", published=latest[1:], releases_behind=0)
     return 0
 

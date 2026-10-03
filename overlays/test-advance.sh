@@ -95,6 +95,18 @@ advance 3
 status stage '"up-to-date"'
 status releases_behind 0
 unchanged
+# An overlay change on the SAME upstream version republishes under a revision tag
+# (2026-10-03: a merged org overlay change sat unpublished as "up-to-date").
+printf '# overlay revision\n' >> "$TMP/hooks/org/manifest.tsv"
+advance 0
+status stage '"published"'
+new_hash=$(shasum -a 256 "$TMP/hooks/org/manifest.tsv" | awk '{print $1}')
+[ "$(git --git-dir="$TMP/publish.git" log -1 --format=%s deployment)" = "Deploy org from upstream v1.0.0; manifest sha256 $new_hash" ]
+[ "$(git --git-dir="$TMP/publish.git" rev-parse "refs/tags/org/v1.0.0-overlay-${new_hash:0:12}")" = "$(git --git-dir="$TMP/publish.git" rev-parse deployment)" ]
+before=$(refs)
+advance 3
+status stage '"up-to-date"'
+unchanged
 release 1.1.0
 release 1.2.0
 # Prereleases never displace the highest stable tag.
