@@ -51,7 +51,7 @@ Generated bundles do not belong in a manifest. The earlier `estate/dist` branch 
 
 ## Decide where a change belongs
 
-- A product correction useful to upstream users goes to an upstream branch and pull request. A deployment may carry a pending fix as a temporary overlay, with its PR and removal condition recorded in the overlay README. The org overlay carries the session-start read-path correction in upstream PR #4112 until upstream merges it.
+- A product correction useful to upstream users goes to an upstream branch and pull request. A deployment may carry a pending fix as a temporary overlay, with its PR and removal condition recorded in the overlay README. Upstream PR #4112, the org overlay's last such fix, merged in v13.29.0 and its entries were removed.
 - A policy or behavior specific to one deployment goes only in that deployment's manifest and payload tree, with a one-line reason in its README.
 - A deviation shared by both deployments is still a product change candidate. Send a generic change upstream. If upstream would reject it because it expresses local policy, declare it independently in both overlays so each deployment's complete delta remains visible.
 - Deployment values and secrets belong to the deploying repository. They are injected after this source/build step and never committed here.
