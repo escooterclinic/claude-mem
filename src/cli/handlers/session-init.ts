@@ -20,9 +20,9 @@ import { isCodexInternalPrompt, isInternalProtocolPayload } from '../../utils/ta
 import {
   resolveRuntimeContext as defaultResolveRuntimeContext,
   logServerFallback as defaultLogServerFallback,
+  reportServerTransportError,
   type ServerRuntimeContext,
 } from '../../services/hooks/runtime-selector.js';
-import { isServerClientError } from '../../services/hooks/server-client.js';
 
 interface SessionInitResponse {
   sessionDbId: number;
@@ -163,6 +163,9 @@ const sessionInit = {
     const sessionInitTimeoutMs = dependencies.getSessionInitRequestTimeoutMs();
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
+    if (runtime.runtime === 'server-misconfigured') {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
     if (runtime.runtime === 'server') {
       try {
         await startServerSession(
@@ -182,22 +185,8 @@ const sessionInit = {
         // until the server context endpoint exists.
         return { continue: true, suppressOutput: true };
       } catch (error: unknown) {
-        if (isServerClientError(error) && error.isFallbackEligible()) {
-          dependencies.logServerFallback(error.kind, {
-            status: error.status,
-            message: error.message,
-            route: '/v1/sessions/start',
-          });
-          // fall through to worker fallback
-        } else {
-          // Not thrown for recordSessionPrompt either: a rejection that does
-          // not pass would stop the transcript watcher on this turn for good
-          // (see SessionPromptNotRecordedError).
-          logger.error('HOOK', 'Server session-start failed (non-recoverable)', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
-        }
+        reportServerTransportError(error, '/v1/sessions/start');
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
       }
     }
 

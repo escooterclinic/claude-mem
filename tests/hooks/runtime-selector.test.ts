@@ -24,7 +24,7 @@ mock.module('../../src/utils/logger.js', () => ({
     },
     info: () => {},
     debug: () => {},
-    error: () => {},
+    error: (_component: string, msg: string) => { warnLogs.push({ msg }); },
     failure: () => {},
     dataIn: () => {},
     formatTool: () => '',
@@ -88,13 +88,13 @@ describe('runtime-selector', () => {
     expect(ctx.runtime).toBe('worker');
   });
 
-  it('resolveRuntimeContext falls back to worker when api key is missing', () => {
+  it('resolveRuntimeContext returns server-misconfigured when api key is missing', () => {
     mockSettings.CLAUDE_MEM_RUNTIME = 'server';
     mockSettings.CLAUDE_MEM_SERVER_URL = 'http://localhost:1234';
     mockSettings.CLAUDE_MEM_SERVER_PROJECT_ID = 'p1';
     const ctx = resolveRuntimeContext();
-    expect(ctx.runtime).toBe('worker');
-    expect(warnLogs.some(l => l.msg.includes('missing_api_key'))).toBe(true);
+    expect(ctx.runtime).toBe('server-misconfigured');
+    expect(warnLogs.some(l => l.msg.includes('CLAUDE_MEM_SERVER_API_KEY'))).toBe(true);
   });
 
   it("resolveRuntimeContext returns 'server' context when canonical keys are configured", () => {
@@ -159,7 +159,7 @@ describe('runtime-selector', () => {
     mockSettings.CLAUDE_MEM_SERVER_URL = 'http://localhost:1234';
     mockSettings.CLAUDE_MEM_SERVER_API_KEY = 'cmem_xyz';
     expect(buildServerContext()).toBeNull();
-    expect(warnLogs.some(l => l.msg.includes('missing_project_id'))).toBe(true);
+    expect(warnLogs.some(l => l.msg.includes('CLAUDE_MEM_SERVER_PROJECT_ID'))).toBe(true);
   });
 
   it('logServerFallback emits a stable WARN code', () => {

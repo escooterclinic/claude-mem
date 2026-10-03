@@ -12,9 +12,8 @@ import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { clearInjected } from '../../shared/kimi-context-gate.js';
-import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
+import { resolveRuntimeContext, reportServerTransportError } from '../../services/hooks/runtime-selector.js';
 import type { ServerRuntimeContext } from '../../services/hooks/runtime-selector.js';
-import { isServerClientError } from '../../services/hooks/server-client.js';
 import { extractAdvisorCalls } from '../../shared/advisor-transcript.js';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 
@@ -39,7 +38,7 @@ async function recordAdvisorCalls(
 ): Promise<void> {
   if (!transcriptPath) return;
   if (loadFromFileOnce().CLAUDE_MEM_CAPTURE_ADVISOR_CALLS !== 'true') return;
-  if (resolveRuntimeContext().runtime === 'server') return;
+  if (resolveRuntimeContext().runtime !== 'worker') return;
 
   const calls = extractAdvisorCalls(transcriptPath, { currentTurnOnly: true });
   if (calls.length === 0) return;
@@ -201,23 +200,15 @@ export const summarizeHandler: EventHandler = {
     const runtime = resolveRuntimeContext();
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
+    if (runtime.runtime === 'server-misconfigured') {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
     if (runtime.runtime === 'server') {
       try {
         return await summarizeViaServer(runtime, sessionId, lastAssistantMessage, platformSource);
       } catch (error: unknown) {
-        if (isServerClientError(error) && error.isFallbackEligible()) {
-          logServerFallback(error.kind, {
-            status: error.status,
-            message: error.message,
-            route: '/v1/sessions/end',
-          });
-          // fall through to worker fallback
-        } else {
-          logger.error('HOOK', 'Server summarize failed (non-recoverable)', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
-        }
+        reportServerTransportError(error, '/v1/sessions/end');
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
       }
     }
 

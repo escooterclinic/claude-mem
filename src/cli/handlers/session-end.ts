@@ -27,7 +27,7 @@ export const sessionEndHandler: EventHandler = {
 
     const platformSource = normalizePlatformSource(input.platform);
     const runtime = resolveRuntimeContext();
-    if (runtime.runtime === 'server') {
+    if (runtime.runtime !== 'worker') {
       logger.debug('HOOK', 'session-end: Server runtime handling is not implemented, skipping', {
         sessionId,
       });

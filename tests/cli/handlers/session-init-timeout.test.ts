@@ -174,7 +174,7 @@ describe('sessionInitHandler request timeout', () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it('does not reset the full timeout budget after server fallback (#3434)', () => {
+  it('does not fall back to the worker after a server timeout (#3434)', () => {
     const env = { ...process.env };
     delete env.CLAUDE_MEM_INTERNAL;
     const fallbackTimeoutMs = 8000;
@@ -221,9 +221,8 @@ describe('sessionInitHandler request timeout', () => {
         throw new Error('server timeout mismatch: ' + JSON.stringify(serverCalls[0].options));
       }
       const initCall = workerCalls.find(call => call.apiPath === '/api/sessions/init');
-      if (!initCall) throw new Error('worker init call missing');
-      if (typeof initCall.options?.timeoutMs !== 'number' || initCall.options.timeoutMs <= 0 || initCall.options.timeoutMs >= ${fallbackTimeoutMs}) {
-        throw new Error('worker fallback timeout reused full budget: ' + JSON.stringify(initCall.options));
+      if (initCall) {
+        throw new Error('server timeout incorrectly fell back to worker: ' + JSON.stringify(initCall));
       }
     `;
 
@@ -235,7 +234,7 @@ describe('sessionInitHandler request timeout', () => {
       stderr: 'pipe',
     });
 
-    expect(new TextDecoder().decode(result.stderr)).toBe('');
+    expect(new TextDecoder().decode(result.stderr)).toContain('server request failed');
     expect(new TextDecoder().decode(result.stdout)).toBe('');
     expect(result.exitCode).toBe(0);
   });

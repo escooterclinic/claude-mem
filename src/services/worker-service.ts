@@ -1,5 +1,7 @@
 
 import path from 'path';
+import { emitDiagnostic } from '../shared/hook-io.js';
+import { selectRuntime } from './hooks/runtime-selector.js';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { pathToFileURL } from 'url';
@@ -1274,6 +1276,15 @@ function runServerApiKeyCli(args: string[]): never {
 
 async function main() {
   const { command, args: commandArgs } = parseWorkerServiceCommand(process.argv.slice(2));
+
+  if (command === 'start' && selectRuntime() === 'server') {
+    logger.info('SYSTEM', 'server runtime: local worker not started');
+    emitDiagnostic('server runtime: local worker not started\n');
+    console.log(JSON.stringify(buildStatusOutput('ready', undefined, {
+      includeSuppressOutput: process.env.CLAUDE_MEM_CODEX_HOOK !== '1',
+    })));
+    process.exit(0);
+  }
 
   const hookInitiatedCommands = ['start', 'hook', 'restart', '--daemon'];
   if ((command === undefined || hookInitiatedCommands.includes(command)) && isPluginDisabledInClaudeSettings()) {

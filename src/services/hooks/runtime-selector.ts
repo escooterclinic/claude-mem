@@ -18,6 +18,7 @@
 // `CLAUDE_MEM_SERVER_BETA_*` keys when unset.
 
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
+import { emitDiagnostic } from '../../shared/hook-io.js';
 import { logger } from '../../utils/logger.js';
 import { ServerClient, type ServerClientConfig } from './server-client.js';
 
@@ -34,7 +35,12 @@ export interface WorkerRuntimeContext {
   runtime: 'worker';
 }
 
-export type RuntimeContext = ServerRuntimeContext | WorkerRuntimeContext;
+export interface ServerMisconfiguredContext {
+  runtime: 'server-misconfigured';
+  missingSettings: string[];
+}
+
+export type RuntimeContext = ServerRuntimeContext | WorkerRuntimeContext | ServerMisconfiguredContext;
 
 export function selectRuntime(): SelectedRuntime {
   const settings = loadFromFileOnce();
@@ -72,16 +78,13 @@ export function buildServerContext(): ServerRuntimeContext | null {
     settings.CLAUDE_MEM_SERVER_BETA_PROJECT_ID,
   );
 
-  if (!serverBaseUrl) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_base_url');
-    return null;
-  }
-  if (!apiKey) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_api_key');
-    return null;
-  }
-  if (!projectId) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_project_id');
+  const missingSettings = [
+    !serverBaseUrl && 'CLAUDE_MEM_SERVER_URL',
+    !apiKey && 'CLAUDE_MEM_SERVER_API_KEY',
+    !projectId && 'CLAUDE_MEM_SERVER_PROJECT_ID',
+  ].filter((setting): setting is string => Boolean(setting));
+  if (missingSettings.length) {
+    reportServerError(`server-misconfigured: missing ${missingSettings.join(', ')}`);
     return null;
   }
 
@@ -103,11 +106,28 @@ export function resolveRuntimeContext(): RuntimeContext {
   }
   const ctx = buildServerContext();
   if (!ctx) {
-    return { runtime: 'worker' };
+    const settings = loadFromFileOnce();
+    const missingSettings = (['URL', 'API_KEY', 'PROJECT_ID'] as const).filter(suffix =>
+      ![settings[`CLAUDE_MEM_SERVER_${suffix}`], settings[`CLAUDE_MEM_SERVER_BETA_${suffix}`]]
+        .some(value => (value ?? '').trim().length > 0),
+    ).map(suffix => `CLAUDE_MEM_SERVER_${suffix}`);
+    return { runtime: 'server-misconfigured', missingSettings };
   }
   return ctx;
 }
 
 export function logServerFallback(reason: string, details?: Record<string, unknown>): void {
   logger.warn('HOOK', `[server-fallback] reason=${reason}`, details ?? {});
+}
+
+/** Diagnostics bypass the hook's successful-result stderr buffer. */
+export function reportServerError(message: string): void {
+  logger.error('HOOK', message);
+  emitDiagnostic(message + '\n');
+}
+
+export function reportServerTransportError(error: unknown, route: string): void {
+  const failure = error as { kind?: string; status?: number; name?: string } | null;
+  const errorClass = failure?.kind ?? failure?.name ?? typeof error;
+  reportServerError(`server request failed: route=${route} error=${errorClass} status=${failure?.status ?? 'none'}; local worker disabled`);
 }
