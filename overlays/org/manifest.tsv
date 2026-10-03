@@ -1,1 +1,10 @@
 # action	upstream path	expected upstream sha256	overlay payload path
+replace	src/services/hooks/runtime-selector.ts	95d49804ebf76d8ab32719b6b2e8f1dc3effc0901d19ff818c0b25d6cc3fe767	files/src/services/hooks/runtime-selector.ts
+replace	src/cli/handlers/observation.ts	14bc058da9180b3841d48559363136489200e2b07062d60c7f1f1e4d619084f7	files/src/cli/handlers/observation.ts
+replace	src/cli/handlers/session-init.ts	195965cf7c14fa910a76164d26c4088ca8ec772478cd608ef178facf87893567	files/src/cli/handlers/session-init.ts
+replace	src/cli/handlers/summarize.ts	efa15c506040fc95d51ce21ad8ddded2f7f0368641c98749d311b1e4762ae936	files/src/cli/handlers/summarize.ts
+replace	src/cli/handlers/session-end.ts	a4f8ddd434e95214a54b0e826bda5d5fbdc22eed319dde88e0cf3f7e78c51c3f	files/src/cli/handlers/session-end.ts
+replace	src/services/worker-service.ts	f8e4d834846e9c6db9ca11eabe6b96265f79885c782422ce908b60d94b96968c	files/src/services/worker-service.ts
+replace	tests/hooks/runtime-selector.test.ts	e1582326b50d85ed89da0956558d57c4f501d489ac7110f4abd7c77f586d78e8	files/tests/hooks/runtime-selector.test.ts
+add	tests/hooks/server-runtime-strict.test.ts	-	files/tests/hooks/server-runtime-strict.test.ts
+replace	tests/cli/handlers/session-init-timeout.test.ts	4a459bf016d345516eb63f9eb27b210b6f0c12a3fc7967565ba3234fb7798ec7	files/tests/cli/handlers/session-init-timeout.test.ts
