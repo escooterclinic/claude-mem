@@ -8,3 +8,7 @@ replace	src/services/worker-service.ts	f8e4d834846e9c6db9ca11eabe6b96265f79885c7
 replace	tests/hooks/runtime-selector.test.ts	e1582326b50d85ed89da0956558d57c4f501d489ac7110f4abd7c77f586d78e8	files/tests/hooks/runtime-selector.test.ts
 add	tests/hooks/server-runtime-strict.test.ts	-	files/tests/hooks/server-runtime-strict.test.ts
 replace	tests/cli/handlers/session-init-timeout.test.ts	4a459bf016d345516eb63f9eb27b210b6f0c12a3fc7967565ba3234fb7798ec7	files/tests/cli/handlers/session-init-timeout.test.ts
+replace	src/services/hooks/server-client.ts	f70e8d2dd6c9747aa6c46146f22dcfbdb3670f6fb8e9b6918721a9c04ba2eb7f	files/src/services/hooks/server-client.ts
+add	src/utils/repo-identity.ts	-	files/src/utils/repo-identity.ts
+add	tests/utils/repo-identity.test.ts	-	files/tests/utils/repo-identity.test.ts
+add	tests/cli/handlers/session-init-repo-identity.test.ts	-	files/tests/cli/handlers/session-init-repo-identity.test.ts

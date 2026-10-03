@@ -10,6 +10,7 @@ import {
   consumeWorkerOutageNotice as defaultConsumeWorkerOutageNotice,
   type WorkerFallbackOptions,
 } from '../../shared/worker-utils.js';
+import { repoIdentityFromCwd } from '../../utils/repo-identity.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES, HOOK_TIMEOUTS } from '../../shared/hook-constants.js';
@@ -175,6 +176,7 @@ const sessionInit = {
           platformSource,
           project,
           prompt,
+          cwd,
           Math.max(
             SESSION_INIT_MIN_REMAINING_TIMEOUT_MS,
             Math.floor(sessionInitTimeoutMs / SESSION_INIT_SERVER_TIMEOUT_DIVISOR),
@@ -306,8 +308,10 @@ async function startServerSession(
   platformSource: string,
   project: string,
   prompt: string,
+  cwd: string,
   timeoutMs: number,
 ): Promise<void> {
+  const repoIdentity = repoIdentityFromCwd(cwd);
   await runtime.client.startSession({
     projectId: runtime.projectId,
     externalSessionId: sessionId,
@@ -316,6 +320,7 @@ async function startServerSession(
     agentType: input.agentType ?? null,
     platformSource,
     metadata: { project, prompt },
+    ...(repoIdentity ? { repo_identity: repoIdentity } : {}),
   }, { timeoutMs });
   logger.info('HOOK', 'session-init: server session started', {
     contentSessionId: sessionId,
