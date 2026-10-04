@@ -65,6 +65,7 @@ export interface ServerRequestOptions {
 }
 
 export interface ServerStartSessionRequest {
+  repo_identity?: string;
   projectId: string;
   externalSessionId?: string | null;
   contentSessionId?: string | null;
@@ -361,6 +362,7 @@ export class ServerClient {
 
   buildStartSessionPayload(input: ServerStartSessionRequest): Record<string, unknown> {
     return {
+      ...(input.repo_identity ? { repo_identity: input.repo_identity } : {}),
       projectId: input.projectId,
       ...(input.externalSessionId !== undefined ? { externalSessionId: input.externalSessionId } : {}),
       ...(input.contentSessionId !== undefined ? { contentSessionId: input.contentSessionId } : {}),
