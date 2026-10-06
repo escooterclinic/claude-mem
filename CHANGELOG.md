@@ -4,6 +4,74 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [13.31.1] - 2026-10-06
+
+## Cloud sync: uploads no longer blocked by Supabase's firewall
+
+Since the move to Supabase, Supabase's Cloudflare firewall rejected some memory uploads based on their content, answering with an HTML "Attention Required!" page. The worker read that as an invalid token: it paused sync, told users to reconnect (which couldn't help), and left the rest of their upload queue stuck behind the blocked batch.
+
+- **Server side (already live, no update needed):** `sync.cmem.ai` now compresses uploads before forwarding them, and the `cmem-sync` function decodes them, so they get through the firewall.
+- **Worker:** an HTML 401/403 is no longer treated as a bad token. It's an ordinary failure that retries.
+- **Worker:** installs that were given the direct Supabase sync URL during setup are moved back to `https://sync.cmem.ai` on their own.
+
+## Other fixes
+
+- **smart-read:** keeps more symbols across C++, Haskell, Go, Rust, Zig, Swift, Kotlin, Ruby, PHP, Lua, TOML, JS and Python, and recognizes source file extensions regardless of case.
+- **search and smart-search:**
+  - substring reads are kept when FTS probing can't write
+  - observation filters are honored during semantic hydration
+  - multi-category selections survive every search strategy
+  - matches are ranked by their full relevance score
+- **context:**
+  - reads assistant transcript rows that contain only whitespace
+  - encodes every non-alphanumeric character in the cwd
+  - discards renders after a cache variant is torn down
+  - counts retained reinforcements once
+- **viewer and HTTP:**
+  - data feed pagination is bounded before SQLite runs
+  - truncated row identities are rejected
+  - one failed SSE client no longer affects healthy ones
+  - malformed observation metadata is recovered
+  - saved settings are preserved while loading
+- **Reliability:**
+  - non-finite `retry-after` hints are ignored
+  - spool tool ids are namespaced by session and platform
+  - the first observation's session owner is kept
+  - the MCP server loads in the launcher process
+  - plugin roots given as relative paths become absolute at install
+  - log follow reads are bounded
+  - watcher configuration shapes that would break it are rejected
+  - knowledge saves require a successful SDK result
+  - exports keep the last good file when a write partly fails
+
+## [13.31.0] - 2026-10-05
+
+## Sessions start without waiting
+
+A new session no longer waits on SQLite reading a project's whole history, or on cloud sync. On a 1.2 GB database the claude-mem SessionStart hook took about 3 seconds (up to 44 s at worst). The queries behind it now read a few hundred pages instead of tens of thousands, the precomputed context file is used even with cloud sync on, and nothing at session start waits on the network.
+
+### Performance
+
+- **Newest memories come straight from an index.** SessionStart used to fetch every observation and summary in the project, including worktrees merged into it, and sort them all to keep the newest 50. On the database we measured that was about 21,700 rows (63 MB) per session start, and 0.8–1.7 s whenever those pages were not in memory. New indexes keyed on project and date (schema v63) let it read the newest rows for each project key and stop. The results are identical, and the query takes about 4 ms. (#4427)
+- **Project-alias lookups no longer load rows.** Every context render resolves which stored project keys belong to the checkout. That lookup loaded each merged row just to read its project name: 7,499 pages for 31 keys. Covering indexes (schema v64) answer it from the index: 355 pages, 9 ms. (#4429)
+- **Local first with cloud sync on.** The worker builds SessionStart context from the local database straight away. The pull from the sync hub still runs, but in the background, so a slow or unreachable hub never delays a session. The precomputed SessionStart context file no longer waits for a Realtime connection: the local database is the source of truth, and every change sync applies refreshes the file. (#4427)
+- **Cowork plugin skips the cloud read when claude-mem is installed locally.** The `claude-mem-cowork` hook no longer fetches context from cmem.ai, at session start or for agent prompts, on a machine where the local claude-mem hook already injects it. Cowork's cloud containers still read from cmem.ai. (#4427)
+
+### Features
+
+- **iFlytek Spark preset** for the OpenAI-compatible provider (Astron MaaS, default model `spark-x2.5`). (#4379)
+
+### Fixes
+
+- **Cloud sync** no longer retries before the server's Retry-After minimum after jitter. (#4383)
+- **Full-text search:** an interrupted FTS capability probe, or one seen from another connection, no longer turns off full-text search. (#4385)
+- **Field compression** keeps the observation's context. (#4403)
+- **Streams:** an interrupted SSE response, or a rejected early-stop cancellation, no longer leaves its stream locked (#4382). SSE clients are removed when Bun closes their socket (#4394).
+- **Logs:** a log over 10 MiB with no newlines no longer makes the tail reader loop forever and block the worker. (#4393)
+- **Viewer:** a failed pagination request releases the loading state and shows the error. (#4387)
+- **Parser:** array entries that decode to whitespace are dropped instead of stored as blank facts. (#4397)
+- **Smart file outlines** keep multiline imports (#4409), assign methods to the right class (#4406), and include generator functions (#4419).
+
 ## [13.30.1] - 2026-10-05
 
 ## Continue and resume preserve the restored conversation

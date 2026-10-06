@@ -7,7 +7,7 @@ import { SessionStore } from '../../src/services/sqlite/SessionStore.js';
 import * as ingestShared from '../../src/services/worker/http/shared.js';
 import { setIngestContext } from '../../src/services/worker/http/shared.js';
 import { drainHookSpool, HookSpoolDrainer } from '../../src/services/worker/hook-spool-drain.js';
-import { HookSpool } from '../../src/shared/hook-spool.js';
+import { HookSpool, hookSpoolKeyFor } from '../../src/shared/hook-spool.js';
 import { logger } from '../../src/utils/logger.js';
 
 let spoolDir: string;
@@ -102,7 +102,7 @@ describe('drainHookSpool', () => {
     expect(sessionManager.queueObservation).toHaveBeenCalledTimes(2);
     const sessionDbId = store.findSessionDbIdByContentSessionId('session-a', 'claude');
     expect(sessionDbId).not.toBeNull();
-    expect(sessionManager.queueSummarize).toHaveBeenCalledWith(sessionDbId, 'done');
+    expect(sessionManager.queueSummarize).toHaveBeenCalledWith(sessionDbId, 'done', 0);
     expect(sessionManager.requestSessionWrapup).toHaveBeenCalledWith(sessionDbId);
     expect(store.getAdvisorCalls(0, 10).items.map(call => call.tool_use_id)).toEqual(['srvtoolu_1']);
     expect(ensureGeneratorRunning).toHaveBeenCalledWith(sessionDbId, 'summarize');
@@ -172,7 +172,7 @@ describe('drainHookSpool exactly-once hand-off across restarts', () => {
     contentSessionId: 'crash-session', platformSource: 'claude', toolName: 'Bash',
     toolInput: { command: 'ls' }, toolResponse: { stdout: 'x' }, cwd: '/repo', toolUseId: 'toolu_crash_1',
   };
-  const ENTRY_KEY = 'observation-toolu_crash_1';
+  const ENTRY_KEY = `observation-${hookSpoolKeyFor('observation', crashObservation)}`;
   const neverSettles = () => new Promise<never>(() => {});
 
   async function waitUntil(condition: () => boolean, label: string): Promise<void> {

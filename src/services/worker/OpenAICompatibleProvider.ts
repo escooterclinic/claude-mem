@@ -1,3 +1,5 @@
+import { assistantText } from '../../shared/assistant-text.js';
+export { assistantText } from '../../shared/assistant-text.js';
 import { createHash } from 'crypto';
 import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
@@ -111,21 +113,6 @@ export interface OpenAIChatMessage {
 /** Sent when every turn is empty, so a request never carries `messages: []`. */
 const EMPTY_HISTORY_FALLBACK = '(context unavailable)';
 
-/**
- * The answer text of an OpenAI-shaped reply's `message.content`. Gateways may
- * send content blocks instead of a string; only text blocks count, and
- * reasoning or tool-call arguments are never substituted for the answer
- * (#4017). Anything else reads as no text.
- */
-export function assistantText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .filter((part): part is { type: 'text'; text: string } =>
-      part !== null && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')
-    .map(part => part.text)
-    .join('\n');
-}
 
 /**
  * Shared scaffolding for OpenAI-compatible, multi-turn HTTP providers
@@ -528,10 +515,6 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     originalTimestamp: number | null,
     lastCwd: string | undefined
   ): Promise<void> {
-    if (message.prompt_number !== undefined) {
-      session.lastPromptNumber = message.prompt_number;
-    }
-
     if (!session.memorySessionId) {
       throw new Error('Cannot process observations: memorySessionId not yet captured. This session may need to be reinitialized.');
     }
@@ -555,7 +538,10 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     // rather than a head/tail slice with the middle cut out (#3800). The field
     // cap scales with the model's window (#3625).
     // A newer user prompt may arrive while the payload is being condensed.
-    const responseContext = snapshotResponseContext(session);
+    const responseContext = {
+      ...snapshotResponseContext(session),
+      promptNumber: message.prompt_number ?? session.lastPromptNumber,
+    };
     const fieldMaxChars = observationFieldMaxChars(session.observerContextWindowTokens);
     const optimized = await optimizeObservationFields(
       { toolInput: message.tool_input, toolOutput: message.tool_response },
@@ -620,7 +606,7 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
 
   private async processSummaryMessage(
     session: ActiveSession,
-    message: { last_assistant_message?: string },
+    message: { last_assistant_message?: string; prompt_number?: number },
     worker: WorkerRef | undefined,
     config: TConfig,
     mode: ModeConfig,
@@ -630,7 +616,6 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     if (!session.memorySessionId) {
       throw new Error('Cannot process summary: memorySessionId not yet captured. This session may need to be reinitialized.');
     }
-
     const summaryPrompt = buildSummaryPrompt({
       id: session.sessionDbId,
       memory_session_id: session.memorySessionId,
@@ -638,7 +623,10 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
       user_prompt: session.userPrompt,
       last_assistant_message: message.last_assistant_message || ''
     }, mode);
-    const responseContext = snapshotResponseContext(session);
+    const responseContext = {
+      ...snapshotResponseContext(session),
+      promptNumber: message.prompt_number ?? session.lastPromptNumber,
+    };
 
     session.conversationHistory.push({ role: 'user', content: summaryPrompt });
 
