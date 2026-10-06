@@ -1,10 +1,10 @@
 # action	upstream path	expected upstream sha256	overlay payload path
 replace	src/services/hooks/runtime-selector.ts	95d49804ebf76d8ab32719b6b2e8f1dc3effc0901d19ff818c0b25d6cc3fe767	files/src/services/hooks/runtime-selector.ts
-replace	src/cli/handlers/observation.ts	14bc058da9180b3841d48559363136489200e2b07062d60c7f1f1e4d619084f7	files/src/cli/handlers/observation.ts
-replace	src/cli/handlers/session-init.ts	195965cf7c14fa910a76164d26c4088ca8ec772478cd608ef178facf87893567	files/src/cli/handlers/session-init.ts
-replace	src/cli/handlers/summarize.ts	efa15c506040fc95d51ce21ad8ddded2f7f0368641c98749d311b1e4762ae936	files/src/cli/handlers/summarize.ts
-replace	src/cli/handlers/session-end.ts	a4f8ddd434e95214a54b0e826bda5d5fbdc22eed319dde88e0cf3f7e78c51c3f	files/src/cli/handlers/session-end.ts
-replace	src/services/worker-service.ts	f8e4d834846e9c6db9ca11eabe6b96265f79885c782422ce908b60d94b96968c	files/src/services/worker-service.ts
+replace	src/cli/handlers/observation.ts	65c223f0f22b335251898d3d5e22261c8172ab0dfa090cfa8bfe4059e07ba101	files/src/cli/handlers/observation.ts
+replace	src/cli/handlers/session-init.ts	9b95ac540a67c5096f21f6d3eb172d162cfb22694b06f02efcf913f432b5ecb9	files/src/cli/handlers/session-init.ts
+replace	src/cli/handlers/summarize.ts	8a34418c984ccf146b2ba28b0d929385143b96eeb85bca8016ff25427cd370ca	files/src/cli/handlers/summarize.ts
+replace	src/cli/handlers/session-end.ts	df053d8dc82ef63709bfe418741dab8715f02636d3b1e4acdf15a7bc650a4f1a	files/src/cli/handlers/session-end.ts
+replace	src/services/worker-service.ts	90e1de81be86b2841b49869b70b95a61b1393c3cef9a506943ff7087591ede6f	files/src/services/worker-service.ts
 replace	tests/hooks/runtime-selector.test.ts	e1582326b50d85ed89da0956558d57c4f501d489ac7110f4abd7c77f586d78e8	files/tests/hooks/runtime-selector.test.ts
 add	tests/hooks/server-runtime-strict.test.ts	-	files/tests/hooks/server-runtime-strict.test.ts
 replace	tests/cli/handlers/session-init-timeout.test.ts	4a459bf016d345516eb63f9eb27b210b6f0c12a3fc7967565ba3234fb7798ec7	files/tests/cli/handlers/session-init-timeout.test.ts
@@ -12,5 +12,5 @@ replace	src/services/hooks/server-client.ts	f70e8d2dd6c9747aa6c46146f22dcfbdb367
 add	src/utils/repo-identity.ts	-	files/src/utils/repo-identity.ts
 add	tests/utils/repo-identity.test.ts	-	files/tests/utils/repo-identity.test.ts
 add	tests/cli/handlers/session-init-repo-identity.test.ts	-	files/tests/cli/handlers/session-init-repo-identity.test.ts
-replace	src/cli/handlers/file-context.ts	893b2b314a846cc10eaf8c8521499cdb47c75a3f55b09998ca251f375b24e1d2	files/src/cli/handlers/file-context.ts
+replace	src/cli/handlers/file-context.ts	52ff8241d37e5e535100cc8e05275e15013abfb007dae046e267eb1bf8f78141	files/src/cli/handlers/file-context.ts
 add	tests/hooks/file-context-server-runtime.test.ts	-	files/tests/hooks/file-context-server-runtime.test.ts

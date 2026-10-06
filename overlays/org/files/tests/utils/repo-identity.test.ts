@@ -47,6 +47,11 @@ describe('bounded cwd discovery', () => {
     try {
       writeFileSync(join(fixture, 'git'), '#!/bin/sh\n[ "$1" = "-C" ] && [ "$2" = "/session/cwd" ] && [ "$3" = "remote" ] && [ "$4" = "get-url" ] && [ "$5" = "origin" ] || exit 1\necho git@github-nexus:eMobility-Innovations/nexus.git\n', { mode: 0o755 });
       writeFileSync(join(fixture, 'ssh'), '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "github-nexus" ] || exit 1\necho "hostname github.com"\n', { mode: 0o755 });
+      // macOS may delay the first execution of a newly written script beyond
+      // the production discovery budget. Validate and warm these fixtures first;
+      // the hung-command cases above still exercise the unchanged timeout.
+      expect(Bun.spawnSync([join(fixture, 'git'), '-C', '/session/cwd', 'remote', 'get-url', 'origin']).exitCode).toBe(0);
+      expect(Bun.spawnSync([join(fixture, 'ssh'), '-G', 'github-nexus']).exitCode).toBe(0);
       const script = `const { repoIdentityFromCwd } = await import('./src/utils/repo-identity.ts'); console.log(repoIdentityFromCwd('/session/cwd'));`;
       const result = Bun.spawnSync([process.execPath, '--eval', script], { env: { ...process.env, PATH: fixture }, stdout: 'pipe', stderr: 'pipe' });
       expect(result.exitCode).toBe(0);
