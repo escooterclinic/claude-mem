@@ -17,6 +17,10 @@ worker-runtime timeout coverage is retained.
 worker/spawn tripwires, covering canonical/legacy startup, all missing settings,
 HTTP and transport failures, no SQLite creation, and worker-mode dispatch.
 
+- `file-context.ts` returns a no-op outside the worker runtime. Upstream calls the worker API
+  from the PreToolUse:Read hook regardless of runtime, which lazy-spawns a local worker and
+  creates claude-mem.db beside the shared store (measured 2026-10-06 on v13.29.0). Remove the
+  row once upstream guards the handler; `file-context-server-runtime.test.ts` covers it.
 - Upstream PR thedotmack/claude-mem#4112 merged in v13.29.0. `test.sh` retains the
   upstream shared-store context regression test and runs the strict runtime suites.
 - Generated bundles are rebuilt from source, never maintained as payloads.

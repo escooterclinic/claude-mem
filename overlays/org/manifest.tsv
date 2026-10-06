@@ -12,3 +12,5 @@ replace	src/services/hooks/server-client.ts	f70e8d2dd6c9747aa6c46146f22dcfbdb367
 add	src/utils/repo-identity.ts	-	files/src/utils/repo-identity.ts
 add	tests/utils/repo-identity.test.ts	-	files/tests/utils/repo-identity.test.ts
 add	tests/cli/handlers/session-init-repo-identity.test.ts	-	files/tests/cli/handlers/session-init-repo-identity.test.ts
+replace	src/cli/handlers/file-context.ts	893b2b314a846cc10eaf8c8521499cdb47c75a3f55b09998ca251f375b24e1d2	files/src/cli/handlers/file-context.ts
+add	tests/hooks/file-context-server-runtime.test.ts	-	files/tests/hooks/file-context-server-runtime.test.ts
