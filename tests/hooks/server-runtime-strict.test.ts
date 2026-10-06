@@ -28,6 +28,9 @@ const worker = await import('./src/shared/worker-utils.ts');
 mock.module('./src/shared/worker-utils.ts', () => ({ ...worker,
   executeWithWorkerFallback: async () => { throw new Error('LOCAL_WORKER_CALLED'); },
 }));
+mock.module('./src/cli/spool-hook-event.ts', () => ({
+  spoolHookEvent: () => { throw new Error('LOCAL_WORKER_CALLED'); },
+}));
 `;
 const input = `{ sessionId: 'strict-test-session', cwd: '/tmp/strict-project', platform: 'claude-code',
   prompt: 'test prompt', toolName: 'Read', toolInput: {}, toolResponse: 'result',
@@ -112,10 +115,13 @@ if (result.exitCode !== 0) throw new Error('hook must exit 0');
     it(`${runtime || 'unset'} runtime retains worker dispatch`, () => {
       const result = isolated(`
 import { mock } from 'bun:test';
-const worker = await import('./src/shared/worker-utils.ts');
-mock.module('./src/shared/worker-utils.ts', () => ({ ...worker,
- executeWithWorkerFallback: async () => { console.log('WORKER_DISPATCH'); return {}; },
- isWorkerFallback: () => false,
+mock.module('./src/cli/spool-hook-event.ts', () => ({
+ spoolHookEvent: (kind, payload) => {
+   if (kind !== 'observation' || payload.contentSessionId !== 'strict-test-session' || payload.toolName !== 'Read') {
+     throw new Error('invalid worker dispatch: ' + JSON.stringify({ kind, payload }));
+   }
+   console.log('WORKER_DISPATCH');
+ },
 }));
 const { observationHandler } = await import('./src/cli/handlers/observation.ts');
 await observationHandler.execute(${input});
