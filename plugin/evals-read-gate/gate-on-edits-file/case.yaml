@@ -1,5 +1,0 @@
-schema_version: "1.1"
-name: gate-on-edits-file
-tags: [gate-on]
-context:
-  scaffold_script: scaffold-gate-on.sh

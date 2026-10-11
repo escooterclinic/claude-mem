@@ -34,6 +34,7 @@ import { telemetryBuffer } from './telemetry/buffer.js';
 import { collectInstallStats } from './telemetry/install-stats.js';
 import { runHistoricalBackfill } from './telemetry/backfill.js';
 import { runWorkerDependencyPreflight } from './worker/dependency-preflight.js';
+import { provisionTreeSitterCliForPluginRoot } from './worker/tree-sitter-cli-provisioning.js';
 import { IdleExitMonitor, MIN_IDLE_EXIT_MS, parseIdleExitMs } from './worker/idle-exit-monitor.js';
 import { isWorkerAutostartDisabled } from '../shared/worker-autostart.js';
 
@@ -146,6 +147,9 @@ import { SearchRoutes } from './worker/http/routes/SearchRoutes.js';
 import { SettingsRoutes } from './worker/http/routes/SettingsRoutes.js';
 import { LogsRoutes } from './worker/http/routes/LogsRoutes.js';
 import { MemoryRoutes } from './worker/http/routes/MemoryRoutes.js';
+import { MemoryFileWatcher } from './memory/file-watcher.js';
+import { parseMemoryWatchRoots } from './memory/config.js';
+import { saveMemory } from './memory/save-memory.js';
 import { MemoryIngestRoutes } from './worker/http/routes/MemoryIngestRoutes.js';
 import { DedupRoutes } from './worker/http/routes/DedupRoutes.js';
 import { CorpusRoutes } from './worker/http/routes/CorpusRoutes.js';
@@ -277,6 +281,7 @@ export class WorkerService implements WorkerRef {
 
   private chromaMcpManager: ChromaMcpManager | null = null;
   private transcriptWatcher: TranscriptWatcher | null = null;
+  private memoryFileWatcher: MemoryFileWatcher | null = null;
   private syncClient: SyncClient | null = null;
   private contextCacheService: ContextCacheService | null = null;
   private idleExitMonitor: IdleExitMonitor | null = null;
@@ -421,6 +426,12 @@ export class WorkerService implements WorkerRef {
     }
     if (this.transcriptWatcher !== null) {
       logger.warn('SYSTEM', 'Idle exit stays off: transcript watches are active, and only a running worker captures them', {
+        value: settings.CLAUDE_MEM_IDLE_EXIT_SEC,
+      });
+      return;
+    }
+    if (this.memoryFileWatcher != null) {
+      logger.warn('SYSTEM', 'Idle exit stays off: memory-file watches are active, and only a running worker captures them', {
         value: settings.CLAUDE_MEM_IDLE_EXIT_SEC,
       });
       return;
@@ -707,6 +718,13 @@ export class WorkerService implements WorkerRef {
         logger.info('SYSTEM', 'Dependency preflight passed');
       }
 
+      // Not awaited: a download must not hold readiness. See
+      // provisionTreeSitterCliForPluginRoot for why the worker does it.
+      const pluginRoot = path.dirname(__dirname);
+      provisionTreeSitterCliForPluginRoot(pluginRoot).catch(error => {
+        logger.warn('SYSTEM', 'tree-sitter CLI provisioning failed: smart_search, smart_outline and smart_unfold cannot parse, and the File Read Gate stays off, until the next worker start retries (or npx claude-mem repair)', { pluginRoot }, error instanceof Error ? error : new Error(String(error)));
+      });
+
       logger.info('WORKER', 'Checking for one-time CWD remap...');
       runOneTimeCwdRemap();
 
@@ -905,6 +923,15 @@ export class WorkerService implements WorkerRef {
       });
 
       await this.startTranscriptWatcher(settings);
+      try {
+        const roots = parseMemoryWatchRoots(settings.CLAUDE_MEM_MEMORY_WATCH_ROOTS);
+        if (roots.length) {
+          this.memoryFileWatcher = new MemoryFileWatcher(roots, input => saveMemory(this.dbManager, 'claude-mem', input));
+          this.memoryFileWatcher.start();
+        }
+      } catch (error) {
+        logger.warn('HOOK', 'Memory folder bridge configuration unavailable', { error: error instanceof Error ? error.message : String(error) });
+      }
 
       // Seed Grok Bot Memory INDEX files from current observations so seats
       // do not wait for the next store before the mid-attach file exists.
@@ -1105,6 +1132,8 @@ export class WorkerService implements WorkerRef {
         // Before the DB closes: a pending re-render would read a closed connection.
         this.contextCacheService?.stop();
         this.contextCacheService = null;
+        this.memoryFileWatcher?.stop();
+        this.memoryFileWatcher = null;
 
         await this.codexAgent.close();
         if (this.transcriptWatcher) {
