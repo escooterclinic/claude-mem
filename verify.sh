@@ -17,9 +17,23 @@ set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 rc=0
 
+# gate_verdict <status> -- keep what the gate's exit status SAYS.
+# `claude-gate-run` exits 3 when it was ended before the suite reached a verdict
+# (claude-code-policy#834). `cmd || rc=1` throws that away and reports a red suite. It
+# still BLOCKS, with 125.
+gate_verdict() {
+  if [ "$1" -eq 3 ]; then
+    echo "verify: the gate was ENDED before it reached a verdict - NOT a failing suite." >&2
+    exit 125
+  elif [ "$1" -ne 0 ]; then
+    rc=1
+  fi
+}
+
 echo "== tests/run.sh =="
 if command -v claude-gate-run >/dev/null 2>&1; then
-  claude-gate-run --two-rail -- bash tests/run.sh || rc=1
+  claude-gate-run --two-rail -- bash tests/run.sh
+  gate_verdict $?
 else
   bash tests/run.sh || rc=1
 fi
