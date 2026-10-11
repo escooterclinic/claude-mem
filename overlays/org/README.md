@@ -8,7 +8,7 @@ log their error class and HTTP status and stop successfully, without local fallb
 SessionEnd and advisor capture also refuse worker dispatch in misconfigured server
 runtime. Unset and worker runtime retain upstream behaviour.
 
-`manifest.tsv` declares SHA-pinned replacements against upstream v13.32.0. The
+`manifest.tsv` declares SHA-pinned replacements against upstream v13.35.0. The
 upstream runtime-selector test that expected missing API keys to select worker is
 explicitly replaced with the org expectation. The upstream session-init timeout
 test that expected a worker retry after server failure is likewise replaced; its
@@ -26,7 +26,7 @@ HTTP and transport failures, no SQLite creation, and worker-mode dispatch.
 - Generated bundles are rebuilt from source, never maintained as payloads.
 - Deployment values are injected by the deploying repository, never stored here.
 
-Rebased onto v13.32.0: all rows remain necessary; no rows were dropped. Upstream
+Rebased onto v13.35.0: all rows remain necessary; no rows were dropped. Upstream
 worker spooling, lifecycle changes, and File Read Gate changes are retained beneath
 the org runtime guards. Both replaced upstream test files are unchanged upstream,
 so their org expectations remain unchanged. All added paths remain absent upstream. The strict runtime test now watches
