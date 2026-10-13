@@ -14,3 +14,5 @@ add	src/utils/repo-identity.ts	-	files/src/utils/repo-identity.ts
 add	tests/utils/repo-identity.test.ts	-	files/tests/utils/repo-identity.test.ts
 add	tests/cli/handlers/session-init-repo-identity.test.ts	-	files/tests/cli/handlers/session-init-repo-identity.test.ts
 add	tests/hooks/file-context-server-runtime.test.ts	-	files/tests/hooks/file-context-server-runtime.test.ts
+add	src/utils/writing-machine.ts	-	files/src/utils/writing-machine.ts
+add	tests/utils/writing-machine.test.ts	-	files/tests/utils/writing-machine.test.ts

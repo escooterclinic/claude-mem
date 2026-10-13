@@ -44,3 +44,9 @@ env opt-out and transport-failure changes are kept beneath the org guards). `fil
 stays, narrowed: upstream #4576 (our #4558) now skips the lookup in `server` runtime, but not in
 `server-misconfigured`, where it still lazy-spawns a worker beside the shared store; the row is
 now a one-line widening of upstream's guard (`!== 'worker'`). Drop it when upstream does the same.
+
+Writing machine (2026-10-13): `server-client.ts` spreads `writingMachineHeaders()`
+(added `src/utils/writing-machine.ts`) into every request, so each bundle sends
+`X-Claude-Mem-Writing-Machine: <~/.config/claude-policy/machine-id>` natively and
+fails open. `test.sh` greps the BUILT `plugin/scripts/*.cjs` client bundles for the
+header; claude-code-policy's cache patch classifies such a bundle as `native`.

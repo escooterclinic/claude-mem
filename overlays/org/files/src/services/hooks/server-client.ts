@@ -15,6 +15,7 @@ import { fetchWithTimeout } from '../../shared/worker-utils.js';
 import { HOOK_TIMEOUTS, getTimeout } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { stripMemoryTagsFromJsonStrings } from '../../utils/tag-stripping.js';
+import { writingMachineHeaders } from '../../utils/writing-machine.js';
 
 const DEFAULT_TIMEOUT_MS = getTimeout(HOOK_TIMEOUTS.API_REQUEST);
 
@@ -414,6 +415,7 @@ export class ServerClient {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
+        ...writingMachineHeaders(),
       },
     };
     if (body !== undefined) {
