@@ -8,7 +8,7 @@ log their error class and HTTP status and stop successfully, without local fallb
 SessionEnd and advisor capture also refuse worker dispatch in misconfigured server
 runtime. Unset and worker runtime retain upstream behaviour.
 
-`manifest.tsv` declares SHA-pinned replacements against upstream v13.35.0. The
+`manifest.tsv` declares SHA-pinned replacements against upstream v13.37.0. The
 upstream runtime-selector test that expected missing API keys to select worker is
 explicitly replaced with the org expectation. The upstream session-init timeout
 test that expected a worker retry after server failure is likewise replaced; its
@@ -37,3 +37,10 @@ The repo-identity alias fixture validates and warms its synthetic git/ssh script
 before bounded discovery, avoiding first-execution delays on macOS. Its identity
 expectation and hung-command timeout tests remain intact; production budgets are
 unchanged.
+
+Rebased onto v13.37.0 (2026-10-13). Five rows had moved upstream and were merged three-way
+(observation, session-init, worker-service, server-client; upstream's server-event privacy,
+env opt-out and transport-failure changes are kept beneath the org guards). `file-context.ts`
+stays, narrowed: upstream #4576 (our #4558) now skips the lookup in `server` runtime, but not in
+`server-misconfigured`, where it still lazy-spawns a worker beside the shared store; the row is
+now a one-line widening of upstream's guard (`!== 'worker'`). Drop it when upstream does the same.

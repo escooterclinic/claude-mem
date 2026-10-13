@@ -10,6 +10,7 @@ import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { shouldSkipAgentObservation } from '../../shared/should-skip-agent-observation.js';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
+import { isToolSkipped } from '../../shared/is-tool-skipped.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { resolveRuntimeContext, reportServerTransportError } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError, type ServerRecordEventRequest } from '../../services/hooks/server-client.js';
@@ -85,6 +86,12 @@ export const observationHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
     if (runtime.runtime === 'server') {
+      // Server events never pass through worker ingest, which is where
+      // CLAUDE_MEM_SKIP_TOOLS applies in worker runtime, so apply it here.
+      if (isToolSkipped(toolName, loadFromFileOnce().CLAUDE_MEM_SKIP_TOOLS)) {
+        logger.debug('HOOK', 'Server runtime: tool excluded by CLAUDE_MEM_SKIP_TOOLS', { toolName });
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+      }
       const event: ServerRecordEventRequest = {
         projectId: runtime.projectId,
         contentSessionId: sessionId,
