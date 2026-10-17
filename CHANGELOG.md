@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [14.0.0] - 2026-10-17
+
+## Claude-Mem 14.0.0: My Work and TeamBrain
+
+### My Work: see what you asked for, and where it stands
+Claude-Mem now opens on **My Work**, a local, human-readable view of the requests you've given your agents.
+
+- **Cards, List and Agents views.** Full-width request cards with the title, a plain-language summary, who worked on it and the project. Switch to a sortable list or a view by agent. "Attention first" sorting brings anything that needs you to the top.
+- **Readable summaries.** Each request gets a short everyday-language summary of what happened and the next step, written by the model you've already configured. The last good summary stays visible while a new one is written. With no compatible provider, you see the recorded wording.
+- **Live status.** In progress, Needs you, No recent update, Ready to check and Checked update as work is recorded, without the page jumping while you read.
+- **Review.** Mark a result as checked yourself, so an agent reporting "done" is never mistaken for a person confirming it.
+- **Drill down.** Open any request to see the work behind it: workstreams, recorded evidence and the original request.
+
+My Work is free, open source and runs on your machine.
+
+### TeamBrain: shared work for teams (optional)
+TeamBrain brings the work your team chooses to share into the same experience: open work, useful context and handoffs, without anyone's private work being broadcast. Teams can set it up self-serve at **$50 per seat per month** at https://cmem.ai/teambrain.
+
+### Also in this release
+- Codex: skips next-message suggestion and rollout-consolidation helper prompts (#4812).
+- Windows tests now spawn the running Bun directly (#4814).
+
+**Upgrade:** `npx claude-mem@latest install`
+
+## [13.41.0] - 2026-10-17
+
+# Build, release, and work-state visibility
+
+## Workflow skills
+
+- `build` delegates a coding session through `make-plan`, `do`, and `babysit`.
+- `release` delegates publication through `version-bump` and `childhood`.
+- `build-and-release` runs both, merging the ready PR before continuing from updated main.
+- Restores the existing `childhood` skill so post-release verification is included.
+
+The new wrappers are deliberately short. They reuse the existing workflows.
+
+## Work-state telemetry
+
+Adds privacy-preserving PostHog rollups for work-state usage by release, host platform, and recorded agent role. The rollups distinguish captured reads and writes, outcomes, native to-do use, instruction handoffs, and missing attribution.
+
+MCP execution receipts also cover failures before a worker responds. They are a separate observation source and must not be added to captured-call totals.
+
+Instruction handoffs are measured after the platform adapter formats the model-bound output and stdout succeeds. Cached context is included; discarded context and failed output are not counted as successful handoffs. Delayed or untimestamped captures cannot inherit a later instruction handoff.
+
+These are diagnostic signals, not a compliance score. Returning instructions does not prove that a host accepted them or an agent followed them, and an ordinary question may correctly require no write.
+
+No task titles, prompt text, project paths, or raw session/agent IDs are sent. Existing telemetry opt-out remains in effect. This release does not backfill earlier usage.
+
+Local replay deduplication lasts 30 days; older events are dropped. Public/private turn boundaries remain content-free and prevent private activity from inheriting an earlier public prompt. Hosts without verified original timestamps remain outside captured prompt/tool totals.
+
 ## [13.40.0] - 2026-10-16
 
 ## What's new
