@@ -14,14 +14,20 @@
  * `/usr/local/bin` symlink (SPIKE Decision 2).
  */
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { homedir } from 'os';
 import { posix as posixPath, win32 as windowsPath } from 'path';
 import { buildSpawnSyncInvocation } from '../shared/spawn.js';
 import { sanitizeEnv } from '../supervisor/env-sanitizer.js';
 import { LAUNCHER_PROTOCOL } from './launcher-protocol.js';
+import { MINIMUM_BUN_VERSION_FOR_BUN_BE_BUN, bunVersionHonoursBunBeBun } from './bun-be-bun-support.js';
 
 const LAUNCHER_VERSION_PROBE_TIMEOUT_MS = 10_000;
+// Antivirus scans a new .exe on its first launch, which can take longer than
+// the POSIX probe allows.
+const WINDOWS_LAUNCHER_VERSION_PROBE_TIMEOUT_MS = 30_000;
+const WINDOWS_COMPILED_PROBE_RETRY_DELAY_MS = 1_000;
+const PROBE_OUTPUT_QUOTE_LIMIT = 80;
 const LAUNCHER_COMPILE_TIMEOUT_MS = 120_000;
 const POWERSHELL_TIMEOUT_MS = 30_000;
 const LAUNCHER_CODESIGN_TIMEOUT_MS = 30_000;
@@ -84,18 +90,72 @@ export function buildLauncherCompileArguments(launcherBundlePath: string, outfil
   ];
 }
 
-/** The protocol a placed launcher prints for `--version`, or null when it is missing or is not our launcher. */
-export function readLauncherProtocol(binaryPath: string): number | null {
-  if (!existsSync(binaryPath)) return null;
+export interface LauncherVersionProbe {
+  /** The protocol the binary printed for `--version`, or null when it printed none. */
+  protocol: number | null;
+  /** Why no protocol came back (exit status, signal, spawn error, last stderr line); null on success. */
+  failure: string | null;
+  /** The process never started (spawn error). */
+  failedToStart: boolean;
+}
+
+function lastNonEmptyLine(text: string | null | undefined): string {
+  return (text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop() ?? '';
+}
+
+/** Windows reports a blocked or crashed .exe as an NTSTATUS code, which is only recognizable in hex. */
+function formatExitStatus(status: number): string {
+  return status > 255 || status < 0 ? `${status} (0x${(status >>> 0).toString(16).toUpperCase()})` : String(status);
+}
+
+function interpretVersionProbe(versionProbe: SpawnSyncReturns<string>, timeoutMs: number): LauncherVersionProbe {
+  const failed = (failure: string, failedToStart = false): LauncherVersionProbe => ({ protocol: null, failure, failedToStart });
+  const stderrLine = lastNonEmptyLine(versionProbe.stderr);
+  const withStderr = (failure: string) => (stderrLine ? `${failure}: ${stderrLine}` : failure);
+  if (versionProbe.error) {
+    if ((versionProbe.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      return failed(withStderr(`timed out after ${timeoutMs} ms`));
+    }
+    return failed(`could not start: ${versionProbe.error.message}`, true);
+  }
+  if (versionProbe.signal) return failed(withStderr(`killed by ${versionProbe.signal}`));
+  if (versionProbe.status !== 0) return failed(withStderr(`exited ${formatExitStatus(versionProbe.status ?? -1)}`));
+  const printedVersion = (versionProbe.stdout ?? '').trim();
+  if (/^\d+$/.test(printedVersion)) return { protocol: Number(printedVersion), failure: null, failedToStart: false };
+  if (!printedVersion) return failed(withStderr('printed nothing'));
+  return failed(`printed "${printedVersion.split(/\r?\n/)[0].slice(0, PROBE_OUTPUT_QUOTE_LIMIT)}" instead of a protocol number`);
+}
+
+/** Runs `<binaryPath> --version` once and says why no protocol came back, if none did. */
+export function probeLauncherVersion(
+  binaryPath: string,
+  timeoutMs: number = LAUNCHER_VERSION_PROBE_TIMEOUT_MS,
+): LauncherVersionProbe {
+  if (!existsSync(binaryPath)) return { protocol: null, failure: 'file not found', failedToStart: false };
   const versionProbe = spawnSync(binaryPath, ['--version'], {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: LAUNCHER_VERSION_PROBE_TIMEOUT_MS,
+    timeout: timeoutMs,
     windowsHide: true,
   });
-  if (versionProbe.status !== 0 || typeof versionProbe.stdout !== 'string') return null;
-  const printedVersion = versionProbe.stdout.trim();
-  return /^\d+$/.test(printedVersion) ? Number(printedVersion) : null;
+  return interpretVersionProbe(versionProbe, timeoutMs);
+}
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+/**
+ * Probes a just-compiled launcher. On Windows, antivirus can hold a new .exe
+ * open while it scans it, so the first launch fails to start; that case gets
+ * one retry after a pause.
+ */
+function probeCompiledLauncher(binaryPath: string, platform: NodeJS.Platform): LauncherVersionProbe {
+  const timeoutMs = platform === 'win32' ? WINDOWS_LAUNCHER_VERSION_PROBE_TIMEOUT_MS : LAUNCHER_VERSION_PROBE_TIMEOUT_MS;
+  const firstProbe = probeLauncherVersion(binaryPath, timeoutMs);
+  if (platform !== 'win32' || !firstProbe.failedToStart) return firstProbe;
+  sleepSync(WINDOWS_COMPILED_PROBE_RETRY_DELAY_MS);
+  return probeLauncherVersion(binaryPath, timeoutMs);
 }
 
 const DEFAULT_WINDOWS_PATH_EXTENSIONS = '.COM;.EXE;.BAT;.CMD';
@@ -152,6 +212,13 @@ export function detectShellConfigFile(
   return { path: posixPath.join(homeDirectory, '.bashrc'), shell: 'bash' };
 }
 
+/** The PATH line the installer writes for this shell (and that uninstall names). */
+function shellPathExportLine(shell: 'zsh' | 'bash' | 'fish', localBinDirectory: string): string {
+  return shell === 'fish'
+    ? `set -gx PATH ${localBinDirectory} $PATH`
+    : 'export PATH="$HOME/.local/bin:$PATH"';
+}
+
 export function shellPathSetupMarkerComment(purposeLabel: string): string {
   return `# Added by claude-mem installer for ${purposeLabel}`;
 }
@@ -185,9 +252,7 @@ export function ensureLocalBinOnShellPath(options: {
     host.platform,
   );
   const binPathLiteral = '$HOME/.local/bin';
-  const exportLine = shell === 'fish'
-    ? `set -gx PATH ${localBinDirectory} $PATH`
-    : `export PATH="${binPathLiteral}:$PATH"`;
+  const exportLine = shellPathExportLine(shell, localBinDirectory);
 
   let existingContent = '';
   if (existsSync(configFile)) {
@@ -390,6 +455,19 @@ const runBunCompile: LauncherCompileRunner = (bunPath, compileArguments, working
   };
 };
 
+/** `<bun> --version`, or null when it does not run (the compile then reports the failure). */
+export type LauncherBunVersionReader = (bunPath: string) => string | null;
+
+const readBunVersionFromExecutable: LauncherBunVersionReader = (bunPath) => {
+  const invocation = buildSpawnSyncInvocation(bunPath, ['--version'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: LAUNCHER_COMPILE_TIMEOUT_MS,
+  });
+  const versionResult = spawnSync(invocation.command, invocation.args, invocation.options);
+  return versionResult.status === 0 && versionResult.stdout ? String(versionResult.stdout).trim() : null;
+};
+
 export type LauncherCodesignRunner = (binaryPath: string) => {
   status: number | null;
   stderr: string;
@@ -442,7 +520,7 @@ export interface LauncherEnsureResult {
 type ExistingLauncherBinary =
   | { kind: 'absent' }
   | { kind: 'dangling-symlink' }
-  | { kind: 'foreign' }
+  | { kind: 'foreign'; reason: string }
   | { kind: 'launcher'; protocol: number };
 
 /**
@@ -455,10 +533,12 @@ function inspectExistingLauncherBinary(binaryPath: string): ExistingLauncherBina
   const linkStats = lstatSync(binaryPath, { throwIfNoEntry: false });
   if (!linkStats) return { kind: 'absent' };
   if (linkStats.isSymbolicLink()) {
-    return existsSync(binaryPath) ? { kind: 'foreign' } : { kind: 'dangling-symlink' };
+    return existsSync(binaryPath) ? { kind: 'foreign', reason: 'it is a symlink' } : { kind: 'dangling-symlink' };
   }
-  const printedProtocol = readLauncherProtocol(binaryPath);
-  return printedProtocol === null ? { kind: 'foreign' } : { kind: 'launcher', protocol: printedProtocol };
+  const versionProbe = probeLauncherVersion(binaryPath);
+  return versionProbe.protocol === null
+    ? { kind: 'foreign', reason: `--version ${versionProbe.failure}` }
+    : { kind: 'launcher', protocol: versionProbe.protocol };
 }
 
 const TEMPORARY_OUTFILE_PATTERN = /^\.claude-mem-.*\.tmp/;
@@ -537,7 +617,8 @@ function moveCompiledLauncherIntoPlace(
  * LauncherEnsureInvocationContext) nothing is compiled, but the cheap PATH
  * step still runs. `resolveBunPath` runs only when a compile is needed.
  * A foreign `claude-mem` at the launcher path is never replaced.
- * Throws on a missing bundle, a failed compile or an unusable result.
+ * Throws on a missing bundle, a Bun older than 1.2.16 (#4933), a failed
+ * compile or an unusable result.
  */
 export function ensureLauncherOnPath(options: {
   pluginRoot: string;
@@ -546,6 +627,7 @@ export function ensureLauncherOnPath(options: {
   invocationContext: LauncherEnsureInvocationContext;
   host?: LauncherHostEnvironment;
   runCompile?: LauncherCompileRunner;
+  readBunVersion?: LauncherBunVersionReader;
   runCodesign?: LauncherCodesignRunner;
   runPowerShell?: PowerShellRunner;
 }): LauncherEnsureResult {
@@ -563,7 +645,7 @@ export function ensureLauncherOnPath(options: {
 
   const existingBinary = inspectExistingLauncherBinary(binaryPath);
   if (existingBinary.kind === 'foreign') {
-    logger.warn(`${binaryPath} exists and is not the claude-mem hook launcher; not replacing`);
+    logger.warn(`${binaryPath} exists and is not the claude-mem hook launcher (${existingBinary.reason}); not replacing`);
     return { status: 'foreign-binary-kept', binaryPath, pathSetupOutcome: null };
   }
   if (existingBinary.kind === 'launcher') {
@@ -585,6 +667,12 @@ export function ensureLauncherOnPath(options: {
   const bunPath = options.resolveBunPath();
   if (!bunPath) {
     return { status: 'bun-not-found', binaryPath, pathSetupOutcome: null };
+  }
+  // A launcher compiled with Bun < 1.2.16 ignores BUN_BE_BUN, so its
+  // no-bun-on-PATH fallback would re-exec itself forever (#4933).
+  const bunVersion = (options.readBunVersion ?? readBunVersionFromExecutable)(bunPath);
+  if (bunVersion !== null && !bunVersionHonoursBunBeBun(bunVersion)) {
+    throw new Error(`Bun ${bunVersion} at ${bunPath} is older than ${MINIMUM_BUN_VERSION_FOR_BUN_BE_BUN}, which the claude-mem launcher needs; run \`bun upgrade\` (or update Bun with your version manager), then \`npx claude-mem install\``);
   }
 
   mkdirSync(binDirectory, { recursive: true });
@@ -616,9 +704,10 @@ export function ensureLauncherOnPath(options: {
     }
     // Verified before the move: after it, a concurrent session may already
     // have renamed its own build over the target.
-    const compiledProtocol = readLauncherProtocol(temporaryOutfilePath);
-    if (compiledProtocol !== LAUNCHER_PROTOCOL) {
-      throw new Error(`compiled launcher printed protocol ${compiledProtocol}, expected ${LAUNCHER_PROTOCOL}`);
+    const compiledProbe = probeCompiledLauncher(temporaryOutfilePath, host.platform);
+    if (compiledProbe.protocol !== LAUNCHER_PROTOCOL) {
+      const probeFailure = compiledProbe.failure ? ` (--version ${compiledProbe.failure})` : '';
+      throw new Error(`compiled launcher printed protocol ${compiledProbe.protocol}, expected ${LAUNCHER_PROTOCOL}${probeFailure}`);
     }
     moveCompiledLauncherIntoPlace(temporaryOutfilePath, binaryPath, binDirectory, host.platform);
   } finally {
@@ -647,7 +736,7 @@ export interface LauncherRemovalResult {
 export function removeInstalledLauncher(host: LauncherHostEnvironment = currentLauncherHostEnvironment()): LauncherRemovalResult {
   const binaryPath = resolveLauncherBinaryPath(host);
   let removedBinaryPath: string | null = null;
-  if (readLauncherProtocol(binaryPath) !== null) {
+  if (probeLauncherVersion(binaryPath).protocol !== null) {
     rmSync(binaryPath, { force: true });
     removedBinaryPath = binaryPath;
   }
@@ -659,14 +748,15 @@ export function removeInstalledLauncher(host: LauncherHostEnvironment = currentL
       pathCleanupHint = `${binDirectory} is still on your user Path; remove it in Environment Variables if you no longer need it.`;
     }
   } else {
-    const { path: configFile } = detectShellConfigFile(
+    const { path: configFile, shell } = detectShellConfigFile(
       host.homeDirectory,
       host.environmentVariables.SHELL ?? '',
       host.platform,
     );
     const markerComment = shellPathSetupMarkerComment('claude-mem');
     if (existsSync(configFile) && readFileSync(configFile, 'utf-8').includes(markerComment)) {
-      pathCleanupHint = `${configFile} still has the "${markerComment}" PATH line (export PATH="$HOME/.local/bin:$PATH"); remove it if nothing else in ~/.local/bin needs it.`;
+      const exportLine = shellPathExportLine(shell, posixPath.join(host.homeDirectory, '.local', 'bin'));
+      pathCleanupHint = `${configFile} still has the "${markerComment}" PATH line (${exportLine}); remove it if nothing else in ~/.local/bin needs it.`;
     }
   }
   return { removedBinaryPath, pathCleanupHint };
