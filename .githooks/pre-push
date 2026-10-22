@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # .githooks/pre-push — run every gate this repo has before anything leaves the machine.
+# gate-body-contract: 1
+# A runtime body is only trusted by the shim if it carries this line; a runtime body
+# that predates the contract (no marker) is a stale checkout the shim steps around.
+# The number is bumped only when the shim must refuse older runtime bodies.
 #
 # TEMPLATE. The canonical copy lives in claude-code-policy/policy/gate-template/pre-push.
 # Copy it into a repo as .githooks/pre-push; it needs no per-repo edits.
@@ -1079,4 +1083,3 @@ printf 'pre-push: GATES FAILED — push refused.\n' >&2
 printf 'pre-push: fix the code. To override deliberately, saying why:\n' >&2
 printf '    SKIP_VERIFY=1 SKIP_VERIFY_REASON="why" git push\n' >&2
 exit 1
-# gate-template-revision: f63647bf
