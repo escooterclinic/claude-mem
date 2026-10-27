@@ -27,6 +27,11 @@ sha256() {
 mkdir -p "$TMP/base/config" "$TMP/fixture-overlays/org/files/config" "$TMP/fixture-overlays/th323/files/config"
 printf 'shared\n' > "$TMP/base/config/runtime.txt"
 printf 'untouched\n' > "$TMP/base/untouched.txt"
+# Upstream ships GitHub Actions workflows; this org's Actions never run (spend $0), and every
+# deployed branch carrying them trips the gate's WORKFLOWS-ARE-BACK alarm on each sync.
+mkdir -p "$TMP/base/.github/workflows"
+printf 'on: push\n' > "$TMP/base/.github/workflows/ci.yml"
+printf 'template\n' > "$TMP/base/.github/ISSUE_TEMPLATE.md"
 
 # Exercise committed build hooks with empty manifests on a minimal base.
 # Product payloads are validated separately against their upstream release.
@@ -110,6 +115,10 @@ assert_file "$TMP/th323-result/config/runtime.txt" personal-only
 assert_file "$TMP/th323-result/config/personal-only.txt" personal-added
 assert_file "$TMP/th323-result/untouched.txt" untouched
 assert_absent "$TMP/th323-result/config/org-only.txt"
+
+assert_absent "$TMP/org-result/.github/workflows"
+assert_absent "$TMP/th323-result/.github/workflows"
+assert_file "$TMP/org-result/.github/ISSUE_TEMPLATE.md" template
 
 # Re-applying replaces the result atomically and produces the same tree.
 before=$(find "$TMP/org-result" -type f -print0 | sort -z | xargs -0 shasum -a 256)

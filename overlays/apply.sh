@@ -99,6 +99,9 @@ temp = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
 try:
     shutil.rmtree(temp)
     shutil.copytree(source, temp, ignore=shutil.ignore_patterns(".git", ".overlay-build", "overlays"))
+    # Upstream's GitHub Actions never run here (org spend stays $0) and a deployed branch
+    # carrying them trips the gate's WORKFLOWS-ARE-BACK alarm after every upstream sync.
+    shutil.rmtree(temp / ".github" / "workflows", ignore_errors=True)
     for action, target, _expected, payload in entries:
         destination = temp / target
         if action == "delete":
