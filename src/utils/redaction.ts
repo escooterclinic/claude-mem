@@ -57,14 +57,23 @@ function keyedLookbehind(key: string): string {
 }
 
 export const BUILTIN_REDACTION_PATTERNS: RedactionPattern[] = [
-  { name: 'aws_access_key',  regex: /AKIA[0-9A-Z]{16}/g },
-  // Known limitation: only matches shell-style (`KEY=val`, `KEY='val'`) and
-  // yaml-style (`KEY: val`); JSON-style `"KEY": "val"` is not anchored
-  // because the lookbehind expects `=`/`:` directly after the key name.
-  // Whitespace is bounded for the same reason as BOUNDED_SPACE. The key name
-  // matches in any letter case: the AWS CLI writes `aws_secret_access_key = …`
-  // to ~/.aws/credentials, and the SDKs take it as a lowercase argument.
-  { name: 'aws_secret_key',  regex: /(?<=AWS_SECRET_ACCESS_KEY\s{0,8}[=:]\s{0,8}['"]?)[A-Za-z0-9/+=]{40}/gi },
+  // `AKIA` is a long-term access key ID; `ASIA` is the temporary one that STS,
+  // SSO and instance roles hand out (`aws sts assume-role`, `aws configure
+  // export-credentials`), printed next to its secret and session token.
+  { name: 'aws_access_key',  regex: /(?:AKIA|ASIA)[0-9A-Z]{16}/g },
+  // Anchored to its key names: `AWS_SECRET_ACCESS_KEY=…` in env output,
+  // `aws_secret_access_key = …` in ~/.aws/credentials and SDK arguments (any
+  // letter case), and `"SecretAccessKey": "…"` in `aws sts` / `aws configure
+  // export-credentials` JSON, which prints it beside the ASIA key ID and the
+  // session token. keyedLookbehind also takes JSON-style `"KEY": "val"`.
+  { name: 'aws_secret_key',  regex: new RegExp(`${keyedLookbehind(String.raw`(?:aws_secret_access_key|\bSecretAccessKey)`)}[A-Za-z0-9/+=]{40}`, 'gi') },
+  // The session token of temporary credentials (STS, SSO, `aws configure
+  // export-credentials`) grants access together with the key pair, so it is
+  // anchored to its key names the same way: `AWS_SESSION_TOKEN=…` in env
+  // output, `aws_session_token = …` in ~/.aws/credentials and
+  // `"SessionToken": "…"` in `aws sts` JSON. Real tokens run to hundreds of
+  // base64 characters; the 100-char floor keeps short placeholders out.
+  { name: 'aws_session_token', regex: new RegExp(`${keyedLookbehind(String.raw`\b(?:aws_session_token|SessionToken)`)}[A-Za-z0-9/+=]{100,}`, 'gi') },
   { name: 'github_pat',      regex: /\bgh[oprsu]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{82}\b/g },
   // openai_key, anthropic_key, slack_token, jwt and google_api_key end in a
   // class that includes `-`. A closing `\b` after a `-` needs a word character
@@ -316,6 +325,29 @@ function genericMarkerForKeyedValue(key: string, value: string, config: Redactio
   return `<redacted type='${name}'/>`;
 }
 
+// The aws_session_token built-in anchors on `SessionToken: …`, so a payload
+// like `{"Credentials": {"SessionToken": "…"}}` needs the key paired with the
+// value again. Same key names and value floor as the text pattern; it is a
+// built-in, so it applies whether or not the generic group is on.
+const AWS_SESSION_TOKEN_KEY = /^(?:aws_session_token|SessionToken)$/i;
+const WHOLE_AWS_SESSION_TOKEN_VALUE = /^[A-Za-z0-9/+=]{100,}$/;
+
+function awsSessionTokenMarkerForKeyedValue(key: string, value: string, config: RedactionConfig): string | null {
+  if (config.disabledBuiltinPatterns?.includes('aws_session_token')) return null;
+  if (!AWS_SESSION_TOKEN_KEY.test(key) || !WHOLE_AWS_SESSION_TOKEN_VALUE.test(value)) return null;
+  return "<redacted type='aws_session_token'/>";
+}
+
+// The same pairing for the secret key of `{"Credentials": {"SecretAccessKey": "…"}}`.
+const AWS_SECRET_KEY_KEY = /^(?:aws_secret_access_key|SecretAccessKey)$/i;
+const WHOLE_AWS_SECRET_KEY_VALUE = /^[A-Za-z0-9/+=]{40}$/;
+
+function awsSecretKeyMarkerForKeyedValue(key: string, value: string, config: RedactionConfig): string | null {
+  if (config.disabledBuiltinPatterns?.includes('aws_secret_key')) return null;
+  if (!AWS_SECRET_KEY_KEY.test(key) || !WHOLE_AWS_SECRET_KEY_VALUE.test(value)) return null;
+  return "<redacted type='aws_secret_key'/>";
+}
+
 /**
  * The value with every string in it (object values and array items, at any
  * depth) redacted, while redaction is on; the caller's value is not mutated.
@@ -328,7 +360,10 @@ export function redactJsonStrings<T>(value: T, config: RedactionConfig = getReda
     if (typeof node === 'string') {
       const result = redactSensitive(node, config);
       if (key === undefined || Object.keys(result.counts).length > 0) return result.redacted;
-      return genericMarkerForKeyedValue(key, node, config) ?? result.redacted;
+      return awsSessionTokenMarkerForKeyedValue(key, node, config)
+        ?? awsSecretKeyMarkerForKeyedValue(key, node, config)
+        ?? genericMarkerForKeyedValue(key, node, config)
+        ?? result.redacted;
     }
     if (Array.isArray(node)) return node.map((child) => walk(child));
     if (node !== null && typeof node === 'object') {

@@ -13,6 +13,7 @@ import {
 } from '../../../sdk/output-classifier.js';
 import { updateCursorContextForProject } from '../../integrations/CursorHooksInstaller.js';
 import { notifyTelegram } from '../../integrations/TelegramNotifier.js';
+import { notifyNotion } from '../../integrations/NotionExporter.js';
 import { notifyGrokBotAwareness } from '../../integrations/GrokBotAwarenessPusher.js';
 import { notifyGrokBotBrainbeat } from '../../integrations/GrokBotBrainbeat.js';
 import { notifyGrokBotIndex } from '../../integrations/GrokBotIndexWriter.js';
@@ -39,8 +40,8 @@ export interface ObservationFileEvidence {
   files_modified: string[];
 }
 
-const READ_TOOL_NAMES = new Set(['Read']);
-const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file']);
+const READ_TOOL_NAMES = new Set(['Read', 'read_file', 'view_file']);
+const WRITE_TOOL_NAMES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'write_file', 'edit_file']);
 const PATCH_TOOL_NAMES = new Set(['apply_patch']);
 
 export function extractObservationFileEvidence(messages: ReadonlyArray<ObservationFileEvidenceMessage>): ObservationFileEvidence {
@@ -130,6 +131,9 @@ function extractPathsFromToolInput(
   }
 
   const paths: string[] = [];
+  // A read's canonical `file_path` wins over a conflicting `path` (Kimi and
+  // OpenClaw send both), so reads never take `path`. agy's `Path` argument is
+  // mapped to `file_path` by its adapter (normalizeAgyToolInput).
   const directFields = mode === 'read'
     ? ['file_path', 'filePath', 'notebook_path', 'notebookPath', 'filePaths']
     : ['file_path', 'filePath', 'notebook_path', 'notebookPath', 'path', 'filePaths'];
@@ -929,6 +933,16 @@ export async function processAgentResponse(
     observations: fresh.observations,
     observationIds: fresh.observationIds,
     project: context.project,
+  });
+
+  // Optional Notion export (off unless CLAUDE_MEM_NOTION_ENABLED). Queues and
+  // returns; the upserts run in the background and never fail capture.
+  notifyNotion({
+    observations: fresh.observations,
+    observationIds: fresh.observationIds,
+    project: context.project,
+    memorySessionId: registeredMemorySessionId,
+    createdAtEpoch: result.createdAtEpoch,
   });
 
   // Growing Grok Bot INDEX: any new observation (any project) can fill a

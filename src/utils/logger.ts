@@ -17,6 +17,7 @@ export enum LogLevel {
 export type Component =
   | 'AGENTS_MD'
   | 'AWARENESS'
+  | 'BACKUP'
   | 'BRANCH'
   | 'CHROMA'
   | 'CHROMA_MCP'
@@ -37,6 +38,7 @@ export type Component =
   | 'HTTP'
   | 'IMPORT'
   | 'INGEST'
+  | 'NOTION'
   | 'OAUTH'
   | 'OMP'
   | 'OPENCLAW'
