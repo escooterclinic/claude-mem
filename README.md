@@ -59,7 +59,7 @@
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
   </a>
   <a href="package.json">
-    <img src="https://img.shields.io/badge/version-15.8.0-green.svg" alt="Version">
+    <img src="https://img.shields.io/badge/version-15.8.1-green.svg" alt="Version">
   </a>
   <a href="package.json">
     <img src="https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg" alt="Node">
@@ -440,7 +440,6 @@ See the [LICENSE](LICENSE) file for full details. See [docs/license.md](docs/lic
 and [docs/ip-boundary.md](docs/ip-boundary.md) for licensing scope and the
 open/commercial boundary.
 
-**Note on Ragtime**: The `ragtime/` directory is licensed under the **Apache License 2.0**. See [ragtime/LICENSE](ragtime/LICENSE) for details.
 
 ---
 
