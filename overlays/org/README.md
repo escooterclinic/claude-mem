@@ -50,3 +50,19 @@ Writing machine (2026-10-13): `server-client.ts` spreads `writingMachineHeaders(
 `X-Claude-Mem-Writing-Machine: <~/.config/claude-policy/machine-id>` natively and
 fails open. `test.sh` greps the BUILT `plugin/scripts/*.cjs` client bundles for the
 header; claude-code-policy's cache patch classifies such a bundle as `native`.
+
+Generation-job retry (2026-11-07). `POST /v1/jobs/:id/retry` republished the stored payload
+verbatim, so a session_summary row whose `payload.generation_job_id` names an id discarded
+`ON CONFLICT` (pre-`c5d52e5c4`) was re-queued pointing at nothing; the worker answered
+`completed`, 0 observations, and the real row sat `queued` forever. `ServerV1PostgresRoutes.ts`
+now re-pins `generation_job_id` to the row's own id in both the published and the persisted
+payload (`retry-repins-generation-job-id.test.ts`). `ProviderObservationGenerator.ts` carries
+escooterclinic/claude-mem `155f979fe`: a payload naming a missing row THROWS instead of reporting
+success. Its test file is replaced to add that regression and to fix the harness (one pool per
+test; load the mode), which was red at v13.37.0 on a stale `search_path`, not on any assertion.
+`test.sh` runs these store suites against a throwaway Postgres it owns. Drop the routes row when
+upstream re-pins on retry, and the generator rows when upstream ships the missing-row guard.
+
+`advance.py --upstream-tag vX.Y.Z` publishes the overlay on a pinned upstream base (tag
+`org/vX.Y.Z-overlay-<sha12>`), for a fix on the deployed version while the advance to newer
+upstream is blocked in overlay-review. It never downgrades below the published version.
