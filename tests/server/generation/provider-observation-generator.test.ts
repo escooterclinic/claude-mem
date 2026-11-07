@@ -13,6 +13,7 @@ import type { ServerGenerationProvider } from '../../../src/server/generation/pr
 import type { Job } from 'bullmq';
 import type { GenerateObservationsForEventJob } from '../../../src/server/jobs/types.js';
 import { quoteIdentifier } from '../../sdk/pg-isolation.js';
+import { ModeManager } from '../../../src/services/domain/ModeManager.js';
 
 const testDatabaseUrl = process.env.CLAUDE_MEM_TEST_POSTGRES_URL;
 
@@ -35,7 +36,12 @@ describe('ProviderObservationGenerator', () => {
     return;
   }
 
-  const pool = new pg.Pool({ connectionString: testDatabaseUrl });
+  // ORG OVERLAY: one pool PER TEST. A single shared pool kept an idle connection
+  // whose search_path named the PREVIOUS test's dropped schema (the 'connect' hook
+  // only fires for new connections), so every test after the first failed with
+  // `relation "observation_generation_jobs" does not exist` -- the red 155f979fe's
+  // author recorded. No assertion changes; only the harness owns its datastore.
+  let pool: pg.Pool;
   let client: PostgresPoolClient;
   let schemaName: string;
   let storage: PostgresStorageRepositories;
@@ -45,6 +51,10 @@ describe('ProviderObservationGenerator', () => {
   let jobId: string;
 
   beforeEach(async () => {
+    // ORG OVERLAY: the generation path reads the active mode; load it so this file
+    // runs standalone (the pattern process-generated-response.test.ts already uses).
+    ModeManager.getInstance().loadMode('code');
+    pool = new pg.Pool({ connectionString: testDatabaseUrl });
     client = await pool.connect();
     schemaName = `cm_phase5_gen_${crypto.randomUUID().replaceAll('-', '_')}`;
     await client.query(`CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
@@ -88,6 +98,7 @@ describe('ProviderObservationGenerator', () => {
       client.release();
     }
     pool.removeAllListeners('connect');
+    await pool.end();
   });
 
   function makeJob(): Job<GenerateObservationsForEventJob> {
@@ -129,6 +140,39 @@ describe('ProviderObservationGenerator', () => {
       teamId,
     });
     expect(reloaded?.status).toBe('completed');
+  });
+
+  // REGRESSION: a payload naming a generation_job row that does not exist used
+  // to return { status: 'completed', observationCount: 0 }. That reported
+  // SUCCESS to BullMQ while the dequeued row was never touched, so the row sat
+  // status=queued forever -- invisible to the failed-job leg (it never failed)
+  // and to the queue-depth leg (BullMQ waiting stayed 0). Measured 2026-09-19:
+  // 8 session_summary rows stranded 385-488h that way.
+  //
+  // Delete the `throw` in ProviderObservationGenerator and this test fails:
+  // process() resolves with status 'completed' instead of rejecting.
+  it('rejects, and does NOT report completed, when the payload names a job row that does not exist', async () => {
+    const provider = new StubProvider('<observation><type>discovery</type><title>OK</title><facts><fact>f</fact></facts></observation>');
+    const generator = new ProviderObservationGenerator({
+      pool,
+      provider,
+    } as unknown as { pool: pg.Pool; provider: ServerGenerationProvider });
+
+    const phantom = crypto.randomUUID();
+    const job = makeJob();
+    (job.data as { generation_job_id: string }).generation_job_id = phantom;
+
+    await expect(generator.process(job)).rejects.toThrow(new RegExp(phantom));
+    // the provider must never be reached for a row that does not exist
+    expect(provider.calls).toBe(0);
+
+    // and the real row must be left alone rather than silently marked done
+    const untouched = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(untouched?.status).toBe('queued');
   });
 
   it('fails fast with an UnrecoverableError when provider returns an empty response', async () => {

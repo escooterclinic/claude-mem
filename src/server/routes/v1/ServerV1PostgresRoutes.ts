@@ -1629,8 +1629,15 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     const persistedBullmqPayload = (current.payload && typeof current.payload === 'object'
       ? current.payload
       : {}) as Record<string, unknown>;
+    // ORG OVERLAY: re-pin generation_job_id to THIS row's id. The worker reloads
+    // the outbox row by payload.generation_job_id, so a stored pointer naming an id
+    // that was minted on an idempotent re-create and discarded ON CONFLICT (before
+    // upstream c5d52e5c4) strands the real row `queued` forever. A retry re-published
+    // it verbatim; re-pinning makes every retry self-healing, and the persisted copy
+    // is re-pinned too because startup reconciliation re-publishes it.
     const newPayload = {
       ...persistedBullmqPayload,
+      generation_job_id: id,
       retried_count: retriedCount,
       last_retried_by_actor: req.authContext?.apiKeyId ?? null,
       last_retried_request_id: req.requestId ?? null,
@@ -1640,6 +1647,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // but keep all canonical job context that the worker validates against.
     const retryBullmqPayload = {
       ...persistedBullmqPayload,
+      generation_job_id: id,
       request_id: req.requestId ?? (persistedBullmqPayload as { request_id?: unknown }).request_id ?? null,
     };
     const updated = await this.options.pool.query(
