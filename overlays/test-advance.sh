@@ -117,6 +117,25 @@ status stage '"dry-run"'
 status releases_behind 2
 status upstream_latest '"v1.2.0"'
 unchanged
+# PINNED BASE: an overlay fix on the deployed upstream version must still publish when
+# newer upstream releases exist and the advance to them is blocked (2026-11-07: org stayed
+# on v13.37.0 while upstream reached v15.11.1 and overlay-review refused every tick).
+printf '# pinned overlay revision\n' >> "$TMP/hooks/org/manifest.tsv"
+advance 0 --upstream-tag v1.0.0
+status stage '"published"'
+status published '"1.0.0"'
+status upstream_latest '"v1.2.0"'
+status releases_behind 2
+pin_hash=$(shasum -a 256 "$TMP/hooks/org/manifest.tsv" | awk '{print $1}')
+[ "$(git --git-dir="$TMP/publish.git" log -1 --format=%s deployment)" = "Deploy org from upstream v1.0.0; manifest sha256 $pin_hash" ]
+[ "$(git --git-dir="$TMP/publish.git" rev-parse "refs/tags/org/v1.0.0-overlay-${pin_hash:0:12}")" = "$(git --git-dir="$TMP/publish.git" rev-parse deployment)" ]
+before=$(refs)
+advance 3 --upstream-tag v1.0.0
+status stage '"up-to-date"'
+unchanged
+advance 1 --upstream-tag v7.7.7
+status ok false
+unchanged
 NPM_FAIL=1 advance 1
 status stage '"build"'
 status ok false

@@ -47,6 +47,10 @@ def options():
     parser.add_argument("--upstream-url", default="https://github.com/thedotmack/claude-mem.git")
     parser.add_argument("--status-file", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    # Publish the overlay on THIS upstream tag instead of the newest one: an overlay fix on
+    # the deployed base must still ship while the advance to newer upstream is blocked in
+    # overlay-review. Never a downgrade: the published-version guard below still applies.
+    parser.add_argument("--upstream-tag")
     return parser.parse_args()
 
 
@@ -141,10 +145,14 @@ def advance(args, status, temp):
     tags = sorted(filter(version, run("git", "-C", str(repo), "tag").splitlines()), key=version)
     if not tags:
         raise ValueError("upstream has no stable release tags")
-    latest = status["upstream_latest"] = tags[-1]
+    status["upstream_latest"] = tags[-1]
+    latest = args.upstream_tag or tags[-1]
+    if latest not in tags:
+        raise ValueError(f"--upstream-tag {latest} is not a stable upstream release tag")
     tip, status["published"] = published_tip(repo, args)
     previous = version("v" + status["published"]) if status["published"] else (-1, -1, -1)
     status["releases_behind"] = sum(version(tag) > previous for tag in tags)
+    behind_after = sum(version(tag) > version(latest) for tag in tags)
     if previous == version(latest):
         # Up to date means the published tree carries THIS overlay, not merely this upstream
         # version. MEASURED 2026-10-03: an org overlay change merged on v13.29.0 was reported
@@ -156,13 +164,13 @@ def advance(args, status, temp):
             status.update(ok=True, stage="up-to-date")
             return 3
         return prepare(repo, overlay, manifest, latest, tip, args, status, temp,
-                       tag_suffix=f"-overlay-{digest[:12]}")
+                       tag_suffix=f"-overlay-{digest[:12]}", behind_after=behind_after)
     if previous > version(latest):
         raise ValueError("published version is newer than upstream; refusing downgrade")
-    return prepare(repo, overlay, manifest, latest, tip, args, status, temp)
+    return prepare(repo, overlay, manifest, latest, tip, args, status, temp, behind_after=behind_after)
 
 
-def prepare(repo, overlay, manifest, latest, tip, args, status, temp, tag_suffix=""):
+def prepare(repo, overlay, manifest, latest, tip, args, status, temp, tag_suffix="", behind_after=0):
     tree, out = temp / "upstream", temp / "output"
     extract(repo, latest, tree)
     status["stage"] = "overlay-review"
@@ -183,7 +191,8 @@ def prepare(repo, overlay, manifest, latest, tip, args, status, temp, tag_suffix
         return 0
     run("git", "-C", str(repo), "push", "--atomic", args.publish_url,
         f"{commit}:refs/heads/{args.publish_branch}", f"{commit}:refs/tags/{args.deployment}/{latest}{tag_suffix}")
-    status.update(ok=True, stage="published", published=latest[1:], releases_behind=0)
+    status.update(ok=True, stage="published", published=latest[1:],
+                  releases_behind=behind_after)
     return 0
 
 

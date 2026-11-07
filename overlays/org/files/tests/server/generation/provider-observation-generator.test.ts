@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import pg from 'pg';
+import {
+  bootstrapServerPostgresSchema,
+  createPostgresStorageRepositories,
+  type PostgresPoolClient,
+  type PostgresStorageRepositories,
+} from '../../../src/storage/postgres/index.js';
+import { ProviderObservationGenerator } from '../../../src/server/generation/ProviderObservationGenerator.js';
+import type { ServerGenerationProvider } from '../../../src/server/generation/providers/shared/types.js';
+import type { Job } from 'bullmq';
+import type { GenerateObservationsForEventJob } from '../../../src/server/jobs/types.js';
+import { quoteIdentifier } from '../../sdk/pg-isolation.js';
+import { ModeManager } from '../../../src/services/domain/ModeManager.js';
+
+const testDatabaseUrl = process.env.CLAUDE_MEM_TEST_POSTGRES_URL;
+
+class StubProvider implements ServerGenerationProvider {
+  readonly providerLabel = 'claude' as const;
+  calls = 0;
+
+  constructor(private readonly response: string | Error) {}
+
+  async generate() {
+    this.calls += 1;
+    if (this.response instanceof Error) throw this.response;
+    return { rawText: this.response, providerLabel: this.providerLabel };
+  }
+}
+
+describe('ProviderObservationGenerator', () => {
+  if (!testDatabaseUrl) {
+    it.skip('requires CLAUDE_MEM_TEST_POSTGRES_URL', () => {});
+    return;
+  }
+
+  // ORG OVERLAY: one pool PER TEST. A single shared pool kept an idle connection
+  // whose search_path named the PREVIOUS test's dropped schema (the 'connect' hook
+  // only fires for new connections), so every test after the first failed with
+  // `relation "observation_generation_jobs" does not exist` -- the red 155f979fe's
+  // author recorded. No assertion changes; only the harness owns its datastore.
+  let pool: pg.Pool;
+  let client: PostgresPoolClient;
+  let schemaName: string;
+  let storage: PostgresStorageRepositories;
+  let teamId: string;
+  let projectId: string;
+  let eventId: string;
+  let jobId: string;
+
+  beforeEach(async () => {
+    // ORG OVERLAY: the generation path reads the active mode; load it so this file
+    // runs standalone (the pattern process-generated-response.test.ts already uses).
+    ModeManager.getInstance().loadMode('code');
+    pool = new pg.Pool({ connectionString: testDatabaseUrl });
+    client = await pool.connect();
+    schemaName = `cm_phase5_gen_${crypto.randomUUID().replaceAll('-', '_')}`;
+    await client.query(`CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
+    await client.query(`SET search_path TO ${quoteIdentifier(schemaName)}`);
+    await bootstrapServerPostgresSchema(client);
+    storage = createPostgresStorageRepositories(client);
+
+    pool.on('connect', (poolClient) => {
+      poolClient.query(`SET search_path TO ${quoteIdentifier(schemaName)}`).catch(() => {});
+    });
+
+    const team = await storage.teams.create({ name: 'team' });
+    const project = await storage.projects.create({ teamId: team.id, name: 'p' });
+    teamId = team.id;
+    projectId = project.id;
+    const event = await storage.agentEvents.create({
+      projectId,
+      teamId,
+      sourceAdapter: 'api',
+      eventType: 'tool_use',
+      payload: { x: 1 },
+      occurredAt: new Date(),
+    });
+    eventId = event.id;
+    const job = await storage.observationGenerationJobs.create({
+      projectId,
+      teamId,
+      sourceType: 'agent_event',
+      sourceId: event.id,
+      agentEventId: event.id,
+      jobType: 'observation_generate_for_event',
+    });
+    jobId = job.id;
+  });
+
+  afterEach(async () => {
+    if (client) {
+      try {
+        await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schemaName)} CASCADE`);
+      } catch {}
+      client.release();
+    }
+    pool.removeAllListeners('connect');
+    await pool.end();
+  });
+
+  function makeJob(): Job<GenerateObservationsForEventJob> {
+    return {
+      id: 'bull-1',
+      data: {
+        kind: 'event',
+        team_id: teamId,
+        project_id: projectId,
+        source_type: 'agent_event',
+        source_id: eventId,
+        generation_job_id: jobId,
+        agent_event_id: eventId,
+        api_key_id: null,
+        actor_id: null,
+        source_adapter: 'api',
+      },
+    } as unknown as Job<GenerateObservationsForEventJob>;
+  }
+
+  it('completes a job using the fake provider response', async () => {
+    const xml = '<observation><type>discovery</type><title>OK</title><facts><fact>f</fact></facts></observation>';
+    const provider = new StubProvider(xml);
+    const generator = new ProviderObservationGenerator({
+      pool: pool as unknown as Parameters<typeof ProviderObservationGenerator['prototype']['process']>[0]['data'] extends never
+        ? never
+        : never,
+      provider,
+    } as unknown as { pool: pg.Pool; provider: ServerGenerationProvider });
+
+    const result = await generator.process(makeJob());
+    expect(result.status).toBe('completed');
+    expect(result.observationCount).toBe(1);
+    expect(provider.calls).toBe(1);
+
+    const reloaded = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(reloaded?.status).toBe('completed');
+  });
+
+  // REGRESSION: a payload naming a generation_job row that does not exist used
+  // to return { status: 'completed', observationCount: 0 }. That reported
+  // SUCCESS to BullMQ while the dequeued row was never touched, so the row sat
+  // status=queued forever -- invisible to the failed-job leg (it never failed)
+  // and to the queue-depth leg (BullMQ waiting stayed 0). Measured 2026-09-19:
+  // 8 session_summary rows stranded 385-488h that way.
+  //
+  // Delete the `throw` in ProviderObservationGenerator and this test fails:
+  // process() resolves with status 'completed' instead of rejecting.
+  it('rejects, and does NOT report completed, when the payload names a job row that does not exist', async () => {
+    const provider = new StubProvider('<observation><type>discovery</type><title>OK</title><facts><fact>f</fact></facts></observation>');
+    const generator = new ProviderObservationGenerator({
+      pool,
+      provider,
+    } as unknown as { pool: pg.Pool; provider: ServerGenerationProvider });
+
+    const phantom = crypto.randomUUID();
+    const job = makeJob();
+    (job.data as { generation_job_id: string }).generation_job_id = phantom;
+
+    await expect(generator.process(job)).rejects.toThrow(new RegExp(phantom));
+    // the provider must never be reached for a row that does not exist
+    expect(provider.calls).toBe(0);
+
+    // and the real row must be left alone rather than silently marked done
+    const untouched = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(untouched?.status).toBe('queued');
+  });
+
+  it('fails fast with an UnrecoverableError when provider returns an empty response', async () => {
+    const provider = new StubProvider('');
+    const generator = new ProviderObservationGenerator({
+      pool: pool as unknown as pg.Pool,
+      provider,
+    } as unknown as ConstructorParameters<typeof ProviderObservationGenerator>[0]);
+
+    // UnrecoverableError name is what makes BullMQ skip its remaining retry
+    // attempts instead of re-dispatching a job whose outbox row is terminal.
+    const rejection = await generator.process(makeJob()).then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
+    expect(rejection).not.toBeNull();
+    expect(rejection?.name).toBe('UnrecoverableError');
+    expect(rejection?.message).toMatch(/empty response/);
+    expect(provider.calls).toBe(1);
+
+    const reloaded = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(reloaded?.status).toBe('failed');
+    expect(reloaded?.lastError?.classification).toBe('empty_response');
+  });
+
+  it('marks a job as failed (no retry) when provider returns malformed XML', async () => {
+    const provider = new StubProvider('not xml at all');
+    const generator = new ProviderObservationGenerator({
+      pool: pool as unknown as pg.Pool,
+      provider,
+    } as unknown as ConstructorParameters<typeof ProviderObservationGenerator>[0]);
+
+    await expect(generator.process(makeJob())).rejects.toThrow(/parse error/);
+
+    const reloaded = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(reloaded?.status).toBe('failed');
+  });
+
+  it('times out a hung provider call and requeues it as transient (#4100)', async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const provider: ServerGenerationProvider = {
+      providerLabel: 'openrouter',
+      generate(_context, signal) {
+        receivedSignal = signal;
+        // Never resolves on its own; settles only when the signal aborts,
+        // mirroring fetch()/response.json() in the real providers.
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const generator = new ProviderObservationGenerator({
+      pool: pool as unknown as ConstructorParameters<typeof ProviderObservationGenerator>[0]['pool'],
+      provider,
+      providerTimeoutMs: 50,
+    });
+
+    await expect(generator.process(makeJob())).rejects.toThrow(/timed out after 50ms/);
+    expect(receivedSignal?.aborted).toBe(true);
+
+    const reloaded = await storage.observationGenerationJobs.getByIdForScope({
+      id: jobId,
+      projectId,
+      teamId,
+    });
+    expect(reloaded?.status).toBe('queued');
+    expect(reloaded?.lastError).toMatchObject({ classification: 'transient' });
+  });
+});
