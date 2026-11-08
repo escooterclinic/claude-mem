@@ -20,3 +20,5 @@ replace	src/server/routes/v1/ServerV1PostgresRoutes.ts	e6672ab32e0b6402a5b228d15
 replace	src/server/generation/ProviderObservationGenerator.ts	e2a75ac0497ce3f422ecbd40b61ff1c16cb8ff885c80e79a7313e3a9dc4c5501	files/src/server/generation/ProviderObservationGenerator.ts
 replace	tests/server/generation/provider-observation-generator.test.ts	112c13b087957bccd32ce9d15f6a069f4cae7f1b0cab969f9d9761c41c5195ef	files/tests/server/generation/provider-observation-generator.test.ts
 add	tests/server/runtime/retry-repins-generation-job-id.test.ts	-	files/tests/server/runtime/retry-repins-generation-job-id.test.ts
+replace	src/server/runtime/ActiveServerGenerationWorkerManager.ts	9784e58df7b2279669ecee83bbd06f6786c2b775efb9b719b283c80c2af5a2d8	files/src/server/runtime/ActiveServerGenerationWorkerManager.ts
+add	tests/server/runtime/terminal-failure-marks-row.test.ts	-	files/tests/server/runtime/terminal-failure-marks-row.test.ts
