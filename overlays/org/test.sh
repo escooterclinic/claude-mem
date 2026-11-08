@@ -21,7 +21,7 @@ if [ -z "${CLAUDE_MEM_TEST_POSTGRES_URL:-}" ]; then
   $pgrun "$pgbin/pg_ctl" -D "$pgdir/db" -o "-p $pgport -k '' -c listen_addresses=127.0.0.1" -l "$pgdir/log" -w start >/dev/null
   export CLAUDE_MEM_TEST_POSTGRES_URL="postgresql://postgres@127.0.0.1:$pgport/postgres"
 fi
-bun test tests/server/runtime/retry-repins-generation-job-id.test.ts tests/server/runtime/jobs-list-and-operator-routes.test.ts tests/server/generation/provider-observation-generator.test.ts
+bun test tests/server/runtime/retry-repins-generation-job-id.test.ts tests/server/runtime/jobs-list-and-operator-routes.test.ts tests/server/generation/provider-observation-generator.test.ts tests/server/runtime/terminal-failure-marks-row.test.ts
 # The BUILT bundles are what clients run: a source change that never reaches them is no fix.
 # Every client bundle that builds a ServerClient must carry the header (server-service.cjs is
 # the server, not a client). Fails when no client bundle is found or any lacks the header.

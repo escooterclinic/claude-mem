@@ -66,3 +66,12 @@ upstream re-pins on retry, and the generator rows when upstream ships the missin
 `advance.py --upstream-tag vX.Y.Z` publishes the overlay on a pinned upstream base (tag
 `org/vX.Y.Z-overlay-<sha12>`), for a fix on the deployed version while the advance to newer
 upstream is blocked in overlay-review. It never downgrades below the published version.
+
+Terminal BullMQ failure marks the row (2026-11-08). `ProviderObservationGenerator.process()`
+reloads and locks the row before its try/catch, so a pool connect error ("timeout exceeded when
+trying to connect") throws past `markGenerationFailed`; BullMQ files the job `failed` and the row
+stays `queued` forever (64 such rows on the org store, attempts 0). `ActiveServerGenerationWorkerManager.ts`
+now observes `failed` on both lanes and, once the job's state is `failed` (or it was evicted), marks a
+still-`queued`/`processing` row `failed`, keeping an existing classification else `transient`, so the
+host requeuer retries it. It never throws; a row it misses is reclaimed by the requeuer's
+queued-orphan leg (escooterclinic/claude-mem-backend). `terminal-failure-marks-row.test.ts` covers it.
