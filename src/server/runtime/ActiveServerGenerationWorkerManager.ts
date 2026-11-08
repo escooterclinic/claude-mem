@@ -97,6 +97,12 @@ export class ActiveServerGenerationWorkerManager implements ServerGenerationWork
           onStalled: (jobId) => {
             void this.auditStalledJob(jobId, lane);
           },
+          // ORG OVERLAY: a job that fails before the generator reaches its row
+          // (a pool connect timeout in loadCanonicalOutbox/lockOutbox) must
+          // still mark that row, or it sits `queued` forever.
+          onFailed: (jobId, _attemptsMade, reason) => {
+            void this.markRowOnTerminalFailure(jobId, lane, reason);
+          },
         });
       } catch (error) {
         logger.warn('SYSTEM', `failed to wire stalled observer for ${lane} lane`, {
@@ -145,6 +151,43 @@ export class ActiveServerGenerationWorkerManager implements ServerGenerationWork
       });
     } finally {
       this.staleSweepInFlight = false;
+    }
+  }
+
+  // ORG OVERLAY (find 2026-11-08). BullMQ's `failed` event fires on EVERY
+  // failed attempt; only a job whose state is now `failed` (or that has
+  // already been evicted) has no retry left. Measured on the org store: 64
+  // rows `queued`, attempts 0, every BullMQ job failed with "timeout exceeded
+  // when trying to connect" — the throw came before process()'s try/catch,
+  // so markGenerationFailed never ran. Mark such a row failed here; keep an
+  // existing classification, else `transient`, so the host requeuer retries
+  // it. Never throws: a row this misses (the DB still down) is reclaimed by
+  // the host requeuer's queued-orphan leg.
+  private async markRowOnTerminalFailure(
+    bullmqJobId: string | undefined,
+    lane: 'event' | 'summary',
+    reason: string,
+  ): Promise<void> {
+    if (!bullmqJobId) return;
+    try {
+      const job = await this.options.queueManager.getQueue(lane).getJob(bullmqJobId);
+      if (job && (await job.getState()) !== 'failed') return;
+      await this.options.pool.query(
+        `UPDATE observation_generation_jobs
+            SET status = 'failed', failed_at = now(), updated_at = now(),
+                locked_at = NULL, locked_by = NULL,
+                last_error = jsonb_build_object(
+                  'classification', coalesce(last_error->>'classification', 'transient'),
+                  'message', 'bullmq job failed terminally before the worker marked the row: ' || $2::text)
+          WHERE bullmq_job_id = $1 AND status IN ('queued', 'processing')`,
+        [bullmqJobId, String(reason ?? '').slice(0, 500)],
+      );
+    } catch (error) {
+      logger.warn('SYSTEM', 'failed to mark generation row after terminal BullMQ failure', {
+        bullmqJobId,
+        lane,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
