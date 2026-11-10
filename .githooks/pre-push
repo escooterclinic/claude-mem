@@ -139,7 +139,7 @@ cd "$REPO_ROOT" || exit 1
 
 # Direct trunk pushes are train-only unless every new committer is declared.
 _td_push_guard() {
-  local remote="${1:-origin}" head trunk lref lsha rref rsha commits sha email exempt
+  local remote="${1:-origin}" head trunk _lref lsha rref rsha commits sha email exempt
   local policy="${HOME}/.claude/policy-runtime/bin/trunk_direct_policy.py"
   _td_email_exempt() {
     if command -v python3 >/dev/null 2>&1 && [ -f "$policy" ]; then
@@ -180,10 +180,10 @@ TD_IDENTITIES
   }
   [ "${CLAUDE_TRUNK_PUSH_OK:-}" = "1" ] && return 0
   head="$(git symbolic-ref -q "refs/remotes/$remote/HEAD" 2>/dev/null || true)"
-  while read -r lref lsha rref rsha; do
+  while read -r _lref lsha rref rsha; do
     case "$head" in
       "refs/remotes/$remote/"*)
-        trunk="${head#refs/remotes/$remote/}"
+        trunk="${head#refs/remotes/"$remote"/}"
         [ "$rref" = "refs/heads/$trunk" ] || continue ;;
       *) case "$rref" in
            refs/heads/main|refs/heads/master) trunk="${rref#refs/heads/}" ;;
@@ -194,12 +194,13 @@ TD_IDENTITIES
     if [[ "$lsha" =~ ^0+$ ]]; then
       : # Deleting trunk is never an identity exemption.
     else
-      if [[ "$rsha" =~ ^0+$ ]]; then
-        commits="$(git rev-list "$lsha" --not "--remotes=$remote" 2>/dev/null)"
-      else
-        commits="$(git rev-list "$rsha..$lsha" 2>/dev/null)"
-      fi
-      if [ "$?" -eq 0 ] && [ -n "$commits" ]; then
+      if commits="$(
+        if [[ "$rsha" =~ ^0+$ ]]; then
+          git rev-list "$lsha" --not "--remotes=$remote" 2>/dev/null
+        else
+          git rev-list "$rsha..$lsha" 2>/dev/null
+        fi
+      )" && [ -n "$commits" ]; then
         exempt=1
         for sha in $commits; do
           email="$(git show -s --format=%ce "$sha" 2>/dev/null)" || { exempt=0; break; }
@@ -420,7 +421,7 @@ _pp_warn_idle_transport() {
   printf '\n'
   printf '!!  pre-push: this push holds an IDLE SSH connection for the whole gate.\n'
   printf '!!  git opened its transport to "%s" BEFORE running this hook and will not\n' "$_h"
-  printf '!!  touch it again until the gate finishes. `ssh -G %s` reports\n' "$_h"
+  printf "!!  touch it again until the gate finishes. \`ssh -G %s\` reports\n" "$_h"
   printf '!!  ServerAliveInterval=0, so nothing keeps that session alive.\n'
   printf '!!  If the remote closes it first, git exits 141 (SIGPIPE) with NO message,\n'
   printf '!!  having transported nothing, immediately after this hook says it passed.\n'
