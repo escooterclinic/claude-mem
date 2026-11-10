@@ -131,13 +131,21 @@ function withoutEnvironmentEchoes(posted: Record<string, unknown>, settingsPath:
 // every secret live — an HTTP-writable redirect hands them to any caller that
 // reaches the API. CLAUDE_MEM_WORKER_HOST decides the bind interface; changing
 // it remotely could re-expose the worker on a non-loopback address without
-// the Observation TV guard's token ever being written.
+// the Observation TV guard's token ever being written. The auto-update pair
+// decides what the installer runs on this machine:
+// CLAUDE_MEM_AUTO_UPDATE_PROMOTED_RELEASE_URL names the file that picks the
+// version `npx claude-mem@<version> update` installs (the updater reads it
+// from the file alone, never the environment: auto-update-check.ts
+// readAutoUpdateSettings), and CLAUDE_MEM_AUTO_UPDATE decides whether that
+// runs at all.
 const FILE_ONLY_SETTING_KEYS = new Set([
   'CLAUDE_CODE_PATH',
   'CLAUDE_MEM_CODEX_PATH',
   'CLAUDE_MEM_CHROMA_UVX_PATH',
   'CLAUDE_MEM_DATA_DIR',
   'CLAUDE_MEM_WORKER_HOST',
+  'CLAUDE_MEM_AUTO_UPDATE',
+  'CLAUDE_MEM_AUTO_UPDATE_PROMOTED_RELEASE_URL',
 ]);
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
@@ -182,6 +190,38 @@ export function isForeignLoopbackBrowserWrite(req: Pick<Request, 'headers'>): bo
 
   const originPort = originUrl.port || '80';
   return originPort !== port;
+}
+
+/**
+ * True when a GET comes from a browser page other than the worker's own. A
+ * read that runs something for the caller (resolving a project from `cwd` runs
+ * `git` there) needs more than the write guard: a `no-cors` fetch or an
+ * `<img src>` sends no Origin, so this also refuses a foreign Referer and a
+ * `same-site`/`cross-site` fetch with neither header (another localhost port is
+ * same-site). Requests with no Origin, Referer or Sec-Fetch-Site (hooks, the
+ * CLI, the MCP server) and `same-origin`/`none` fetches pass. Exported for tests.
+ */
+export function isForeignBrowserRead(req: Pick<Request, 'headers'>): boolean {
+  if (isForeignLoopbackBrowserWrite(req)) return true;
+  const rawReferer = req.headers?.referer;
+  if (Array.isArray(rawReferer)) return true;
+  const hasReferer = typeof rawReferer === 'string' && rawReferer.length > 0;
+  if (hasReferer) {
+    let refererOrigin: string;
+    try {
+      refererOrigin = new URL(rawReferer).origin;
+    } catch {
+      return true;
+    }
+    // Same test as the Origin above: only this worker's own loopback host:port.
+    if (isForeignLoopbackBrowserWrite({ headers: { origin: refererOrigin, host: req.headers.host } })) return true;
+  }
+  const site = req.headers?.['sec-fetch-site'];
+  if (site === 'same-site' || site === 'cross-site') {
+    const hasOrigin = typeof req.headers.origin === 'string' && req.headers.origin.length > 0;
+    if (!hasOrigin && !hasReferer) return true;
+  }
+  return false;
 }
 
 export class SettingsRoutes extends BaseRouteHandler {

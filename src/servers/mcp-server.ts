@@ -13,7 +13,8 @@ declare const __DEFAULT_PACKAGE_VERSION__: string;
 const packageVersion = typeof __DEFAULT_PACKAGE_VERSION__ !== 'undefined' ? __DEFAULT_PACKAGE_VERSION__ : '0.0.0-dev';
 
 import { logger } from '../utils/logger.js';
-import { spoolWorkStateMcpResult } from '../cli/work-state-telemetry.js';
+import { spoolWorkStateMcpInstruction, spoolWorkStateMcpResult } from '../cli/work-state-telemetry.js';
+import { mcpServerInstructions } from '../shared/memory-instructions.js';
 
 console['log'] = (...args: any[]) => {
   logger.error('CONSOLE', 'Intercepted console output (MCP protocol protection)', undefined, { args });
@@ -629,6 +630,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query' },
+        deep: { type: 'boolean', description: 'Opt-in local raw-tool search when observations have no matches. Requires CLAUDE_MEM_TOOL_USES_SEARCH_ENABLED; first page only. Results use T IDs; fetch selected numeric IDs with get_tool_uses.' },
         limit: { type: 'number', description: 'Max results (default 20)' },
         project: { type: 'string', description: 'Worker project name' },
         projectId: { type: 'string', description: 'Server project ID; defaults to the configured server project' },
@@ -645,6 +647,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
       if (selectRuntime() === 'server') {
+        if (args?.deep !== undefined && args.deep !== false) return mcpTextResult('Raw-tool deep search is local-only; no local worker request was made.', true);
         const ctx = requireServerForObservationTool('search');
         const unsupported = ['project', 'obs_type', 'dateStart', 'dateEnd', 'offset', 'orderBy']
           .filter(key => args?.[key] !== undefined);
@@ -742,7 +745,7 @@ Optional Dumb search: \`dumb_search({query, project})\`. Doesn’t reason about 
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     handler: async (args: any) => {
       if (selectRuntime() === 'server') return mcpTextResult('Raw tool I/O is unavailable in server runtime. Use selected server observations; no local worker request was made.', true);
-      return await callWorker('/api/tool-uses/batch', { body: args });
+      return await callWorker('/api/tool-uses/batch', { body: withCheckoutProjects(args ?? {}, currentCheckout()) });
     }
   },
   {
@@ -1186,6 +1189,15 @@ function teamBrainJoined(): boolean {
  * then uses the process launch directory or a verified PWD fallback from the plugin root.
  */
 function createMcpServer(getCwd?: CwdResolver): Server {
+  // How to use these tools: the work-state rule and the memory-use guidance.
+  // They are sent here, at initialize, so the SessionStart context can be the
+  // memory timeline alone. Each part follows the setting that turns it off.
+  const workStateRuleIncluded = workStateEnabled();
+  const instructions = mcpServerInstructions({
+    runtime: selectRuntime(),
+    workStateEnabled: workStateRuleIncluded,
+    memoryInstructionsEnabled: loadFromFileOnce().CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED !== 'false',
+  });
   const server = new Server(
     {
       name: 'claude-mem',
@@ -1195,8 +1207,10 @@ function createMcpServer(getCwd?: CwdResolver): Server {
       capabilities: {
         tools: {},  // Exposes tools capability (handled by ListToolsRequestSchema and CallToolRequestSchema)
       },
+      ...(instructions ? { instructions } : {}),
     }
   );
+  server.oninitialized = () => spoolWorkStateMcpInstruction(workStateRuleIncluded);
 
   const stdioCwd = getCwd ? null : createStdioCwdResolver({ peer: server, pluginRoot: MCP_PLUGIN_ROOT });
   if (stdioCwd) server.setNotificationHandler(RootsListChangedNotificationSchema, async () => stdioCwd.markRootsStale());

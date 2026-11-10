@@ -74,7 +74,7 @@ function spawnPlugin(bunPath: string, args: string[], cwd: string, startFailureL
   });
 
   child.on('close', (exitCode) => {
-    process.exit(exitCode ?? 0);
+    process.exit(exitCode ?? 1);
   });
 }
 
@@ -215,7 +215,6 @@ export function runMcpCommand(): void {
 
   const child = spawnHidden(process.execPath, [mcpScript], {
     stdio: 'inherit',
-    cwd: npmPackageRootDirectory(),
     env: sanitizeEnv(process.env),
   });
 
@@ -225,12 +224,12 @@ export function runMcpCommand(): void {
   });
 
   child.on('close', (exitCode) => {
-    process.exit(exitCode ?? 0);
+    process.exit(exitCode ?? 1);
   });
 }
 
 export function runHookCommand(extraArgs: string[] = []): void {
-  const workerScript = packagePluginScriptPath('worker-service.cjs');
+  const workerScript = workerServiceScriptPath(pluginRootOrExit());
   if (!existsSync(workerScript)) {
     console.error(styleText('red', `Worker script not found at: ${workerScript}`));
     process.exit(1);
@@ -249,13 +248,11 @@ export function runHookCommand(extraArgs: string[] = []): void {
   });
 
   child.on('close', (exitCode) => {
-    process.exit(exitCode ?? 0);
+    process.exit(exitCode ?? 1);
   });
 }
 
 export async function runSearchCommand(queryParts: string[]): Promise<void> {
-  pluginRootOrExit();
-
   const query = queryParts.join(' ').trim();
   if (!query) {
     console.error(styleText('red', 'Usage: npx claude-mem search <query>'));

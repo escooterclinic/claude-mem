@@ -26,8 +26,10 @@ import {
   linkToolUsesToObservation as linkToolUsesToObservationRows,
   getToolUsesByIds as getToolUsesByIdsRows,
   queryToolUses as queryToolUsesRows,
+  queryToolUseIndex as queryToolUseIndexRows,
   countToolUses as countToolUsesRows,
   type ToolUseRow,
+  type ToolUseIndexRow,
   type UpsertToolUseInput,
   type ToolUseQueryFilters,
 } from './tool-uses.js';
@@ -3395,13 +3397,17 @@ export class SessionStore {
 
   getToolUsesByIds(
     ids: Array<number | string>,
-    options: { limit?: number; project?: string; platformSource?: string; contentSessionId?: string } = {}
+    options: { limit?: number; project?: string; projects?: string[]; platformSource?: string; contentSessionId?: string } = {}
   ): ToolUseRow[] {
     return getToolUsesByIdsRows(this.db, ids, options);
   }
 
   queryToolUses(filters: ToolUseQueryFilters = {}): ToolUseRow[] {
     return queryToolUsesRows(this.db, filters);
+  }
+
+  queryToolUseIndex(filters: ToolUseQueryFilters = {}): ToolUseIndexRow[] {
+    return queryToolUseIndexRows(this.db, filters);
   }
 
   appendWorkStateEntry(entry: { project: string; listName: string; fields: WorkStateFields; createdAtEpoch?: number }): number {
@@ -3796,6 +3802,39 @@ export class SessionStore {
       LIMIT 1
     `).get(param) as { prompt_text: string } | undefined;
     return result?.prompt_text ?? null;
+  }
+
+  /**
+   * Epoch ms of this device's newest user prompt or captured tool use, or null
+   * when the database holds neither. It is the auto-updater's durable "quiet"
+   * signal (src/services/auto-update/auto-update-check.ts
+   * isWorkerQuietBySignals): every host's prompts are saved to user_prompts
+   * (SessionRoutes) and every captured tool use to tool_uses (the one
+   * choke point in http/shared.ts), and unlike the in-memory session map it
+   * survives a worker restart.
+   *
+   * Prompts synced from another device (origin_device_id set by SyncApply) are
+   * activity on that device, so they are left out; tool_uses is never synced.
+   * Each half reads its created_at_epoch index from the newest end
+   * (idx_user_prompts_created, idx_tool_uses_created_at_epoch), and the prompt
+   * half stops at the first local row. So it is quick when the newest prompt is
+   * local, and otherwise steps past every synced prompt newer than the newest
+   * local one: the cost grows with that count, with no fixed worst case.
+   * Measured 2026-11-08 with bun:sqlite on an in-memory database holding
+   * 200,000 tool uses: 0.01 ms when the newest prompt is local; 35 ms past
+   * 200,000 synced prompts, 90 ms past 500,000 and 176 ms past 1,000,000 (a
+   * second measurement of 1,000,000 synced prompts and no local one: 256 ms).
+   * The auto-updater calls it at most twice per hourly tick.
+   */
+  getNewestCapturedActivityEpoch(): number | null {
+    const row = this.db.prepare(`
+      SELECT MAX(newest) AS newest FROM (
+        SELECT MAX(created_at_epoch) AS newest FROM user_prompts WHERE origin_device_id IS NULL
+        UNION ALL
+        SELECT MAX(created_at_epoch) AS newest FROM tool_uses
+      )
+    `).get() as { newest: number | null } | null;
+    return row?.newest ?? null;
   }
 
   createSDKSession(
@@ -5132,6 +5171,11 @@ export class SessionStore {
     agent_type?: string | null;
     agent_id?: string | null;
     merged_into_project?: string | null;
+    metadata?: string | null;
+    generated_by_model?: string | null;
+    occurrence_count?: number;
+    reinforcement_dates?: string | null;
+    last_reinforced?: string | null;
   }): { imported: boolean; id: number } {
     // A row from a legacy or hand-edited export can arrive without a session
     // id, and observations.memory_session_id is NOT NULL. /api/import validates
@@ -5166,13 +5210,27 @@ export class SessionStore {
       return { imported: false, id: existing.id };
     }
 
+    // These are recorded memory attributes, not this installation's sync
+    // identity. Keep them on a fresh import so note fingerprints still prevent
+    // re-ingestion and reinforced memories retain their selection history.
+    for (const field of ['metadata', 'generated_by_model', 'reinforcement_dates', 'last_reinforced'] as const) {
+      if (obs[field] != null && typeof obs[field] !== 'string') {
+        throw new TypeError(`Imported ${field} must be a string or null`);
+      }
+    }
+    const occurrenceCount = obs.occurrence_count ?? 1;
+    if (!Number.isSafeInteger(occurrenceCount) || occurrenceCount < 1) {
+      throw new TypeError('Imported occurrence_count must be a positive safe integer');
+    }
+
     const stmt = this.db.prepare(`
       INSERT INTO observations (
         memory_session_id, project, text, type, title, subtitle,
         facts, narrative, concepts, files_read, files_modified,
         prompt_number, discovery_tokens, agent_type, agent_id,
-        created_at, created_at_epoch, merged_into_project
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, created_at_epoch, merged_into_project,
+        metadata, generated_by_model, occurrence_count, reinforcement_dates, last_reinforced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     // The row and its observation_files mappings commit together: an import
@@ -5198,7 +5256,12 @@ export class SessionStore {
         obs.agent_id ?? null,
         obs.created_at,
         obs.created_at_epoch,
-        typeof obs.merged_into_project === 'string' ? obs.merged_into_project : null
+        typeof obs.merged_into_project === 'string' ? obs.merged_into_project : null,
+        obs.metadata ?? null,
+        obs.generated_by_model ?? null,
+        occurrenceCount,
+        obs.reinforcement_dates ?? null,
+        obs.last_reinforced ?? null
       );
       const id = result.lastInsertRowid as number;
       replaceObservationFileIndex(this.db, id, obs.files_read, obs.files_modified);

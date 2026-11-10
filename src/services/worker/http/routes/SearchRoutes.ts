@@ -10,6 +10,7 @@ import { AppError } from '../../../server/ErrorHandler.js';
 import { resolveDateBound } from '../../../../shared/date-bounds.js';
 import { scopedProjects } from '../../../sqlite/project-read-keys.js';
 import { validateBody } from '../middleware/validateBody.js';
+import { isForeignBrowserRead } from './SettingsRoutes.js';
 import { logger } from '../../../../utils/logger.js';
 import { groupByDate } from '../../../../shared/timeline-formatting.js';
 import {
@@ -101,8 +102,7 @@ Memory injection starts on your second session in a project.
 
 \`/learn-codebase\` is available if the user wants to front-load the entire repo into memory in a single pass (~5 minutes on a typical repo, optional). Otherwise memory builds passively as work happens.
 
-Live activity: {viewer_url}
-{pro_trial_line}
+Live activity: {viewer_url}{pro_trial_line}
 How it works: \`/how-it-works\`
 
 This message disappears once the first observation lands.
@@ -387,6 +387,17 @@ export class SearchRoutes extends BaseRouteHandler {
   });
 
   private handleContextInject = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    // `cwd` below is resolved through getProjectContext, which runs `git` in it
+    // (findGitRepoRoot), so another browser page must not choose it, even with
+    // a no-cors fetch that sends no Origin. Hooks, the CLI and the MCP tool
+    // send no browser headers and keep working.
+    if (isForeignBrowserRead(req)) {
+      res.status(403).json({
+        error: 'Forbidden',
+        message: 'Context injection from another browser page is not allowed.',
+      });
+      return;
+    }
     let projectsParam: unknown = req.query.projects || req.query.project;
     const hostCwd = typeof req.query.cwd === 'string' ? req.query.cwd : '';
     // "Include last message" picks the prior session's reply by excluding the
@@ -550,11 +561,12 @@ export class SearchRoutes extends BaseRouteHandler {
     // session that asked: a block that may carry either is served live only.
     const cacheable = !request.includePriorMessage && observerHealthWarning(false) === '';
 
-    // The agent's open to-do lists and working state lead every answer this
-    // route gives a session, the welcome hint included; memory is fitted to
-    // what that leaves of the 10K delivery limit. The terminal preview is for
-    // the human and goes without it, and so does a session whose host turned
-    // work state off (CLAUDE_MEM_WORK_STATE_ENABLED=false, #4606).
+    // The agent's open to-do lists and working state go in every answer this
+    // route gives a session, the welcome hint included: in the memory block
+    // under its header and above the timeline, measured with it, and ahead of
+    // the welcome hint. The terminal preview is for the human and goes without
+    // them, and so does a session whose host turned work state off
+    // (CLAUDE_MEM_WORK_STATE_ENABLED=false, #4606).
     const settings = this.getCachedSettings();
     const workStateEnabled = isWorkStateEnabled(
       process.env.CLAUDE_MEM_WORK_STATE_ENABLED ?? settings.CLAUDE_MEM_WORK_STATE_ENABLED,
@@ -578,9 +590,10 @@ export class SearchRoutes extends BaseRouteHandler {
       if (!await this.projectsHaveObservations(sessionStore, projects, platformSource)) {
         const port = process.env.CLAUDE_MEM_WORKER_PORT ?? settings.CLAUDE_MEM_WORKER_PORT;
         const viewerUrl = getViewerBaseUrl(port);
+        const promo = proTrialLine('welcome-hint', process.env.CLAUDE_MEM_PRO_PLAN ?? settings.CLAUDE_MEM_PRO_PLAN);
         const hintBody = WELCOME_HINT_TEMPLATE
           .replace('{viewer_url}', viewerUrl)
-          .replace('{pro_trial_line}', proTrialLine('welcome-hint'));
+          .replace('{pro_trial_line}', promo ? `\n${promo}` : '');
         // A project with zero observations is exactly where a failing observer
         // hides: without this the health warning (applied inside
         // generateContextWithStats) never reached the user this early-return serves.
@@ -602,17 +615,16 @@ export class SearchRoutes extends BaseRouteHandler {
       projects: projects,
       ...(platformSource ? { platformSource } : {}),
       full,
-      // Beside the work-state section: room for what the hook appends after
-      // this body once the install is in a team (the TeamBrain brief). Env
-      // first, as the hook reads it.
-      reserveChars: (request.reserveChars ?? 0) + (workStateSection ? workStateSection.length + 2 : 0) + teamBriefReserveChars({
+      workStateSection,
+      // Room for what the hook adds ahead of this body once the install is in
+      // a team (the TeamBrain brief). Env first, as the hook reads it.
+      reserveChars: (request.reserveChars ?? 0) + teamBriefReserveChars({
         CLAUDE_MEM_TEAMBRAIN_URL: process.env.CLAUDE_MEM_TEAMBRAIN_URL ?? settings.CLAUDE_MEM_TEAMBRAIN_URL,
-        CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED: process.env.CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED ?? settings.CLAUDE_MEM_MEMORY_INSTRUCTIONS_ENABLED,
       }),
       timePlaceholders: true,
       includePriorMessage: request.includePriorMessage,
     }, forHuman, { execution: this.contextReader ? 'worker' : 'inline', reader: this.contextReader ?? undefined });
-    return { body: withWorkState(contextResult.text), stats: contextResult.stats, cacheable, ...(contextResult.readKeys ? { readKeys: contextResult.readKeys } : {}) };
+    return { body: contextResult.text, stats: contextResult.stats, cacheable, ...(contextResult.readKeys ? { readKeys: contextResult.readKeys } : {}) };
   }
 
   private handleSemanticContext = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {

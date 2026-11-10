@@ -25,6 +25,7 @@ const EXCLUDED_PATTERNS = [
   /SettingsDefaultsManager\.ts$/,  // Must use console.log to avoid circular dependency with logger
   /user-message-hook\.ts$/,  // Deprecated - kept for reference only, not registered in hooks.json
   /cli\/hook-command\.ts$/,  // CLI hook command uses console.log/error for hook protocol output
+  /cli\/run-hook-subcommand\.ts$/,  // `claude-mem hook` usage text on missing args, printed before the hook IO window opens (moved from worker-service.ts)
   /shared\/hook-io\.ts$/,  // Canonical hook-protocol IO module: console.log emits MODEL_CONTEXT JSON to stdout (plan 01 / #2292)
   /cli\/handlers\/user-message\.ts$/,  // User message handler uses console.error for user-visible context
   /services\/transcripts\/cli\.ts$/,  // CLI transcript subcommands use console.log for user-visible interactive output
@@ -54,6 +55,8 @@ const EXCLUDED_PATTERNS = [
   /worker\/session\/abort-reason\.ts$/,  // Pure abort-category authority (enum + preserve set); exits are logged by the handler and runner (#3475)
   /worker\/session\/tier-routing\.ts$/,  // Pure simple-tier tool predicate; the tier choice and the boundary switch are logged by SessionRoutes and SessionManager (#4963)
   /worker\/TimelineService\.ts$/,  // Pure filterByDepth helper after dead-code removal; no side effects (mirrors FallbackErrorHandler)
+  /sqlite\/search-query\.ts$/,  // Pure query/token builders shared by memory and raw search; no side effects
+  /sqlite\/tool-use-search\.ts$/,  // Optional index operations propagate failures to SessionSearch/SearchManager, which log with capability context
   /sqlite\/project-read-keys\.ts$/,  // Pure project-scope SQL builders plus one read query; logging happens at the search/context call sites
   /servers\/checkout-search-scope\.ts$/,  // Pure MCP search-args transform; no side effects or error paths
   /sync\/sync-capabilities\.ts$/,  // Two header constants shared by CloudSync and SyncClient; no code to log

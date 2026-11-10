@@ -22,6 +22,7 @@ import { toBmpSafe } from '../utils/bmp-safe.js';
 import { ensureDirectoryExists, resolveSymlinkWriteTarget } from '../shared/atomic-json.js';
 import { paths } from '../shared/paths.js';
 import { pageMatchingRows } from '../services/sqlite/stream-rows.js';
+import { parseContextCountValue } from '../shared/context-count.js';
 
 const DB_PATH = paths.database();
 const SETTINGS_PATH = paths.settings();
@@ -423,13 +424,13 @@ function processAllFoldersForGeneration(
     dryRun
   });
 
-  return 0;
+  return errorCount > 0 ? 1 : 0;
 }
 
 export async function generateClaudeMd(dryRun: boolean): Promise<number> {
   const workingDir = process.cwd();
   const settings = SettingsDefaultsManager.loadFromFile(SETTINGS_PATH);
-  const observationLimit = parseInt(settings.CLAUDE_MEM_CONTEXT_OBSERVATIONS, 10) || 50;
+  const observationLimit = parseContextCountValue(settings.CLAUDE_MEM_CONTEXT_OBSERVATIONS) ?? 50;
 
   logger.info('CLAUDE_MD', 'Starting CLAUDE.md generation', {
     workingDir,
@@ -493,7 +494,7 @@ function processFilesForCleanup(
     dryRun
   });
 
-  return 0;
+  return errorCount > 0 ? 1 : 0;
 }
 
 export function cleanSingleFile(file: string, relativePath: string, dryRun: boolean): 'deleted' | 'cleaned' {
@@ -501,7 +502,9 @@ export function cleanSingleFile(file: string, relativePath: string, dryRun: bool
   for (let block = findContextBlockRange(remaining); block; block = findContextBlockRange(remaining)) {
     remaining = remaining.slice(0, block.start) + remaining.slice(block.end);
   }
-  const stripped = remaining.trim();
+  // Drop whole blank lines a leading managed block leaves behind, but keep the
+  // first authored line's indentation (an indented Markdown code block).
+  const stripped = remaining.replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
 
   if (stripped === '') {
     if (!dryRun) {

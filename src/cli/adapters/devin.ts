@@ -42,8 +42,15 @@ export const devinAdapter: PlatformAdapter = {
       throw new AdapterRejectedInput('missing_session_id');
     }
     const rawToolName = stringOrUndefined(r.tool_name);
-    const toolName = rawToolName ? DEVIN_TOOL_NAMES[rawToolName] ?? rawToolName : undefined;
+    const toolName = rawToolName && Object.hasOwn(DEVIN_TOOL_NAMES, rawToolName)
+      ? DEVIN_TOOL_NAMES[rawToolName]
+      : rawToolName;
     const source = stringOrUndefined(r.source);
+    const response = r.tool_response;
+    const toolResponse = response && typeof response === 'object' && !Array.isArray(response)
+      && (response as Record<string, unknown>).success === false
+      ? { ...response, is_error: true }
+      : response;
     return {
       sessionId,
       cwd,
@@ -52,8 +59,8 @@ export const devinAdapter: PlatformAdapter = {
       // Devin's file tools already send `file_path` (captured read/edit payloads
       // in tests/fixtures/hosts/devin-hooks.json), so the input passes through.
       toolInput: r.tool_input,
-      // `{ success, output, error }`, stored as the host sent it.
-      toolResponse: r.tool_response,
+      // Retain the host result and give failed calls the worker's error marker.
+      toolResponse,
       // `<tool>:<index>#<hash>`; undocumented, but present in captured payloads.
       toolUseId: stringOrUndefined(r.tool_use_id),
       // Devin's Stop carries no transcript path; summarize uses this instead.

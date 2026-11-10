@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { deepSearchBuildPlugin } from './deep-search-build.js';
 import { build } from 'esbuild';
 import fs from 'fs';
 import path from 'path';
@@ -75,6 +76,16 @@ function assertBundleIntegrity(filePath) {
 const WORKER_SERVICE = {
   name: 'worker-service',
   source: 'src/services/worker-service.ts'
+};
+
+// Hook-only bundle: every agent hook is a short-lived process, and parsing the
+// whole worker bundle for it costs ~0.3 s and ~120 MB. The launcher and
+// bun-runner.js run this file for `hook` when it exists and fall back to
+// worker-service.cjs otherwise. Keep src/cli/hook-entry.ts free of worker,
+// server and provider imports (the build asserts a size budget below).
+const HOOK_SERVICE = {
+  name: 'hook-service',
+  source: 'src/cli/hook-entry.ts'
 };
 
 const SERVER_SERVICE = {
@@ -630,6 +641,7 @@ async function buildHooks() {
     console.log(`\n🔧 Building worker service...`);
     await build({
       entryPoints: [WORKER_SERVICE.source],
+      plugins: [deepSearchBuildPlugin()],
       bundle: true,
       platform: 'node',
       target: 'node18',
@@ -702,6 +714,54 @@ async function buildHooks() {
     const workerStats = fs.statSync(`${hooksDir}/${WORKER_SERVICE.name}.cjs`);
     console.log(`✓ worker-service built (${(workerStats.size / 1024).toFixed(2)} KB)`);
 
+    console.log(`\n🔧 Building hook service...`);
+    await build({
+      entryPoints: [HOOK_SERVICE.source],
+      bundle: true,
+      platform: 'node',
+      target: 'node18',
+      format: 'cjs',
+      outfile: `${hooksDir}/${HOOK_SERVICE.name}.cjs`,
+      alias: { 'zod/v4': 'zod' },
+      minify: true,
+      ...SOURCEMAP_OPTS,
+      logLevel: 'error',
+      external: [
+        'sharp', 'bun:sqlite', 'bun:ffi', 'cohere-ai', 'ollama', '@chroma-core/default-embed', 'onnxruntime-node',
+        'better-auth', 'better-auth/node', 'better-auth/plugins', 'better-auth/db/migration', '@better-auth/api-key',
+        ...POSTHOG_OPTIONAL_IMPORTS,
+      ],
+      define: {
+        '__DEFAULT_PACKAGE_VERSION__': JSON.stringify(version),
+        ...DIRNAME_DEFINE,
+        'import.meta.url': '__IMPORT_META_URL__'
+      },
+      banner: {
+        js: [
+          '#!/usr/bin/env bun',
+          ...DIRNAME_BANNER,
+          'var __IMPORT_META_URL__ = require("node:url").pathToFileURL(__CM_FILENAME__).href;'
+        ].join('\n')
+      }
+    });
+    assertBundleIntegrity(`${hooksDir}/${HOOK_SERVICE.name}.cjs`);
+    fs.chmodSync(`${hooksDir}/${HOOK_SERVICE.name}.cjs`, 0o755);
+    const hookServiceStats = fs.statSync(`${hooksDir}/${HOOK_SERVICE.name}.cjs`);
+    console.log(`✓ hook-service built (${(hookServiceStats.size / 1024).toFixed(2)} KB)`);
+    // Hard budget, unlike the worker's advisory one: the point of this bundle is
+    // to stay cheap to parse. A jump means a worker-sized dependency was pulled
+    // into the hook path; fix the import instead of raising the number.
+    // Basis: measured 782 KB at 96bb200f7 (2026-11-09, #5541); 1200 KB is ~50%
+    // headroom and still a quarter of worker-service.cjs (4.7 MB), whose parse
+    // cost this bundle exists to avoid.
+    const HOOK_SERVICE_MAX_BYTES = 1200 * 1024;
+    if (hookServiceStats.size > HOOK_SERVICE_MAX_BYTES) {
+      throw new Error(
+        `hook-service.cjs is ${(hookServiceStats.size / 1024).toFixed(2)} KB (budget ${(HOOK_SERVICE_MAX_BYTES / 1024).toFixed(0)} KB). ` +
+        `A heavy module leaked into the hook path (src/cli/hook-entry.ts import graph).`
+      );
+    }
+
     await build({
       entryPoints: [CONTEXT_READ_WORKER.source],
       bundle: true,
@@ -721,11 +781,17 @@ async function buildHooks() {
       define: {
         '__DEFAULT_PACKAGE_VERSION__': JSON.stringify(version),
         ...DIRNAME_DEFINE,
+        // Bun 1.3.13 inlines process.env.KEY when transpiling Worker entries,
+        // then reuses those values from its content-keyed disk cache in another
+        // process. Keep the environment object dynamic so a relocated bundle
+        // never opens a previous run's database/config directory.
+        'process.env': '__CM_RUNTIME_ENV__',
         'import.meta.url': '__IMPORT_META_URL__'
       },
       banner: {
         js: [
           ...DIRNAME_BANNER,
+          'var __CM_RUNTIME_ENV__ = process.env;',
           'var __IMPORT_META_URL__ = require("node:url").pathToFileURL(__CM_FILENAME__).href;'
         ].join('\n')
       }
@@ -1238,6 +1304,7 @@ async function buildHooks() {
       'plugin/hooks/qoder-hooks.json',
       'plugin/hooks/qoder-repo-hooks.json',
       'plugin/scripts/bun-runner.js',
+      'plugin/scripts/hook-service.cjs',
       'plugin/scripts/context-read-worker.cjs',
       'plugin/scripts/context-read-worker.cjs.map',
       'plugin/scripts/work-view-read-worker.cjs',
