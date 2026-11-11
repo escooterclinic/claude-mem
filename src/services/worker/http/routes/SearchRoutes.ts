@@ -41,6 +41,7 @@ interface ContextInjectRender {
 import { buildWorkStateContextSection } from '../../../context/sections/WorkStateRenderer.js';
 import { isWorkStateEnabled } from '../../../../shared/work-state-setting.js';
 import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
+import { RUNTIME_SKILLS } from '../../../../shared/runtime-skills.js';
 import { getViewerBaseUrl } from '../../../../shared/worker-utils.js';
 import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { currentUserSettingsSaveCount } from '../../../../shared/context-invalidation.js';
@@ -56,7 +57,7 @@ import { ProgressiveMemorySearch } from '../../ProgressiveMemorySearch.js';
 import { progressiveSearchToolResult, progressiveSearchToolError, type ProgressiveSearchInput } from '../../../../shared/progressive-search.js';
 import { parseProjectList } from '../../../../shared/project-list.js';
 
-const ONBOARDING_EXPLAINER_PATH: string = path.resolve(__dirname, '../skills/how-it-works/onboarding-explainer.md');
+const ONBOARDING_EXPLAINER_PATH: string = path.resolve(__dirname, '../skills', RUNTIME_SKILLS.howItWorks, 'onboarding-explainer.md');
 
 // Read on first request, not at import. Hook processes share this module but
 // never serve the onboarding explainer, so caching at import made every hook
@@ -398,7 +399,9 @@ export class SearchRoutes extends BaseRouteHandler {
       });
       return;
     }
-    let projectsParam: unknown = req.query.projects || req.query.project;
+    // The singular parameter names one exact key, even when it contains a comma.
+    // Repeated `project=` values arrive as an array; each one is an exact key.
+    let projectsParam: unknown = req.query.projects || (req.query.project ? [req.query.project].flat() : undefined);
     const hostCwd = typeof req.query.cwd === 'string' ? req.query.cwd : '';
     // "Include last message" picks the prior session's reply by excluding the
     // session that asks, so only then is its id used, and that answer stays live.
@@ -788,7 +791,7 @@ export class SearchRoutes extends BaseRouteHandler {
         'INVALID_PROJECTS'
       );
     }
-    return scopedProjects({ projects: parseProjectList(entries) });
+    return scopedProjects({ projects: parseProjectList(value) });
   }
 
   private handleOnboardingExplainer = this.wrapHandler((_req: Request, res: Response): void => {

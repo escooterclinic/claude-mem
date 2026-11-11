@@ -79,6 +79,14 @@ describe('SettingsDefaultsManager', () => {
     expect(SettingsDefaultsManager.loadFromFile(settingsPath)).toMatchObject(defaults);
   });
 
+  it('ships line anchors off until settings.json turns them on (#4943)', () => {
+    expect(SettingsDefaultsManager.getAllDefaults().CLAUDE_MEM_LINE_ANCHORS_ENABLED).toBe('false');
+    expect(SettingsDefaultsManager.loadFromFile(settingsPath).CLAUDE_MEM_LINE_ANCHORS_ENABLED).toBe('false');
+
+    writeFileSync(settingsPath, JSON.stringify({ CLAUDE_MEM_LINE_ANCHORS_ENABLED: 'true' }));
+    expect(SettingsDefaultsManager.loadFromFile(settingsPath).CLAUDE_MEM_LINE_ANCHORS_ENABLED).toBe('true');
+  });
+
   describe('loadFromFile', () => {
     describe('file does not exist', () => {
       it('should create file with defaults when file does not exist', () => {
@@ -1155,6 +1163,10 @@ describe('SettingsDefaultsManager', () => {
     // applyEnvOverrides need no key-specific code).
     it('CLAUDE_MEM_CLAUDE_CONFIG_DIR defaults to empty string', () => {
       expect(SettingsDefaultsManager.getAllDefaults().CLAUDE_MEM_CLAUDE_CONFIG_DIR).toBe('');
+    });
+
+    it('CLAUDE_MEM_HOOK_HANDOFF_TIMEOUT_MS defaults to 250ms', () => {
+      expect(SettingsDefaultsManager.getAllDefaults().CLAUDE_MEM_HOOK_HANDOFF_TIMEOUT_MS).toBe('250');
     });
 
     it('cloud sync content flush knobs default to 40 ops / 90s', () => {

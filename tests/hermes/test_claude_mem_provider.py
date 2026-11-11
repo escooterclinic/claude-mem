@@ -18,6 +18,7 @@ import threading
 import time
 import types
 import unittest
+import urllib.error
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -45,6 +46,7 @@ class FakeClaudeMem:
         self.requests = []
         self.replies = {}
         self.delay = 0.0
+        self.before_reply = None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -59,6 +61,8 @@ class FakeClaudeMem:
                     "method": self.command, "path": self.path, "body": body,
                     "authorization": self.headers.get("authorization"),
                 })
+                if owner.before_reply:
+                    owner.before_reply(owner.requests[-1])
                 if owner.delay:
                     time.sleep(owner.delay)
                 status, reply = 200, {}
@@ -146,6 +150,55 @@ class ProviderTest(unittest.TestCase):
         self.provider.record_tool_call("read_file", {"path": "a.log"}, "x" * 5000, "sess-1")
         self.drain()
         self.assertEqual(len(self.fake.requests[1]["body"]["tool_response"]), 1000)
+
+    def test_queued_tool_capture_snapshots_mutable_native_payloads(self):
+        self.provider.on_turn_start(1, "inspect the file")
+        self.drain()
+        release = threading.Event()
+        started = threading.Event()
+        self.client._enqueue(lambda: (started.set(), release.wait(3.0)))
+        self.assertTrue(started.wait(1.0))
+        args = {"path": "original.txt", "options": {"lines": [1, 2], "secret": "<private>token</private>"}}
+        result = {"content": [{"text": "original result <private>hidden</private>"}]}
+        try:
+            self.provider.record_tool_call("read_file", args, result, "sess-1", "snapshot-1")
+            args["path"] = "replacement.txt"
+            args["options"]["lines"].append(99)
+            result["content"][0]["text"] = "replacement result"
+        finally:
+            release.set()
+        self.drain()
+        body = self.fake.requests[-1]["body"]
+        self.assertEqual(body["tool_input"], {"path": "original.txt", "options": {"lines": [1, 2], "secret": ""}})
+        self.assertEqual(json.loads(body["tool_response"]), {"content": [{"text": "original result "}]})
+        self.assertEqual(body["tool_use_id"], "snapshot-1")
+        # Sanitizing capture must not mutate the host's still-owned objects.
+        self.assertEqual(args["options"]["secret"], "<private>token</private>")
+
+    def test_queued_note_snapshots_nested_metadata(self):
+        release = threading.Event()
+        started = threading.Event()
+        self.client._enqueue(lambda: (started.set(), release.wait(3.0)))
+        self.assertTrue(started.wait(1.0))
+        metadata = {"source": {"paths": ["original.txt"]}}
+        try:
+            self.client.save_note("sess-1", self.cwd, "A saved fact", "A title", metadata)
+            metadata["source"]["paths"].append("later.txt")
+        finally:
+            release.set()
+        self.drain()
+        body = self.fake.requests[-1]["body"]
+        self.assertEqual(body["metadata"]["source"], {"paths": ["original.txt"]})
+        self.assertEqual(metadata, {"source": {"paths": ["original.txt", "later.txt"]}})
+
+    def test_invalid_snapshot_does_not_escape_or_stop_later_capture(self):
+        cyclic = {}
+        cyclic["self"] = cyclic
+        self.provider.record_tool_call("terminal", cyclic, "invalid", "sess-1")
+        self.provider.record_tool_call("terminal", {"command": "valid"}, "done", "sess-1")
+        self.drain()
+        self.assertEqual(len(self.fake.requests), 1)
+        self.assertEqual(self.fake.requests[0]["body"]["tool_input"], {"command": "valid"})
 
     def test_memory_tools_and_child_agents_are_not_recorded(self):
         self.provider.on_turn_start(1, "remember this")
@@ -314,6 +367,57 @@ class ProviderTest(unittest.TestCase):
         self.assertEqual(self.fake.requests[0]["body"]["cwd"], other)
 
 
+class SenderShutdownTest(unittest.TestCase):
+    def test_full_queue_shutdown_retires_unsent_work_and_stops_the_sender(self):
+        fake = FakeClaudeMem()
+        self.addCleanup(fake.close)
+        release, started = threading.Event(), threading.Event()
+        fake.before_reply = lambda _: (started.set(), release.wait(3.0))
+        client = client_module.ClaudeMemClient(client_module.Config(fake.base), queue_size=1)
+        try:
+            client.record_tool("session", REPO, "terminal", {"command": "in flight"}, "done")
+            self.assertTrue(started.wait(1.0))
+            client.record_tool("session", REPO, "terminal", {"command": "queued"}, "done")
+            self.assertEqual(client._queue.qsize(), 1)
+            before = time.monotonic()
+            client.close(timeout=0.02)
+            self.assertLess(time.monotonic() - before, 0.5)
+            client.record_tool("session", REPO, "terminal", {"command": "after close"}, "done")
+            release.set()
+            client._thread.join(1.0)
+            self.assertFalse(client._thread.is_alive(), "a full queue must not lose the shutdown sentinel")
+            self.assertTrue(client.flush(0.1))
+            self.assertEqual([r["body"]["tool_input"]["command"] for r in fake.requests], ["in flight"])
+        finally:
+            release.set()
+            client.close(timeout=0.05)
+            client._thread.join(1.0)
+
+    def test_capture_after_completed_shutdown_is_not_accepted(self):
+        fake = FakeClaudeMem()
+        self.addCleanup(fake.close)
+        client = client_module.ClaudeMemClient(client_module.Config(fake.base))
+        client.close(timeout=0.1)
+        client._thread.join(1.0)
+        self.assertFalse(client._thread.is_alive())
+        client.record_tool("session", REPO, "terminal", {}, "after close")
+        self.assertTrue(client.flush(0.1), "closed clients must not retain jobs with no sender")
+        self.assertEqual(fake.requests, [])
+
+    def test_shutdown_drains_healthy_work_and_is_idempotent(self):
+        fake = FakeClaudeMem()
+        self.addCleanup(fake.close)
+        client = client_module.ClaudeMemClient(client_module.Config(fake.base))
+        for command in ("first", "second"):
+            client.record_tool("session", REPO, "terminal", {"command": command}, "done")
+        client.close(timeout=1.0)
+        client._thread.join(1.0)
+        self.assertFalse(client._thread.is_alive())
+        self.assertEqual([r["body"]["tool_input"]["command"] for r in fake.requests], ["first", "second"])
+        client.close(timeout=0.1)
+        self.assertTrue(client.flush(0.1), "repeated close must not enqueue another sentinel")
+
+
 class TagScanTest(unittest.TestCase):
     """The tag scanner visits each character once: the old `<name[^>]*>` tail
     rescanned the rest of the text for every unfinished `<name` candidate."""
@@ -347,6 +451,28 @@ class FailSoftTest(unittest.TestCase):
         transport = client_module.Transport(client_module.Config("http://localhost"))
         with mock.patch("urllib.request.urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value.read.side_effect = client_module.http.client.IncompleteRead(b"", 2)
+            for _ in range(client_module.BREAKER_FAILURES):
+                with self.assertRaises(client_module.RequestFailed):
+                    transport.worker("GET", "/test")
+        self.assertTrue(transport.breaker.open())
+
+    def test_a_client_error_does_not_open_the_breaker(self):
+        # HTTPError subclasses OSError, so a 4xx used to count as a transport
+        # failure: three bad requests silenced every later call for 30 seconds.
+        transport = client_module.Transport(client_module.Config("http://localhost"))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = urllib.error.HTTPError(
+                "http://localhost/test", 400, "Bad Request", {}, None)
+            for _ in range(client_module.BREAKER_FAILURES * 2):
+                with self.assertRaises(client_module.RequestFailed):
+                    transport.worker("POST", "/test", {"hello": "world"})
+        self.assertFalse(transport.breaker.open())
+
+    def test_a_server_error_still_counts_toward_the_breaker(self):
+        transport = client_module.Transport(client_module.Config("http://localhost"))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = urllib.error.HTTPError(
+                "http://localhost/test", 503, "Service Unavailable", {}, None)
             for _ in range(client_module.BREAKER_FAILURES):
                 with self.assertRaises(client_module.RequestFailed):
                     transport.worker("GET", "/test")
@@ -613,6 +739,27 @@ class RecallPrivacyTest(unittest.TestCase):
 
 
 class ServerModeTest(unittest.TestCase):
+    def test_hosted_tool_capture_snapshots_before_the_sender_runs(self):
+        fake = FakeClaudeMem()
+        self.addCleanup(fake.close)
+        client = client_module.ClaudeMemClient(client_module.Config("", fake.base, "key", "project"))
+        self.addCleanup(client.close)
+        release = threading.Event()
+        started = threading.Event()
+        client._enqueue(lambda: (started.set(), release.wait(3.0)))
+        self.assertTrue(started.wait(1.0))
+        args, result = {"command": "first"}, {"exit": 0}
+        try:
+            client.record_tool("session", REPO, "terminal", args, result, "hosted-snapshot")
+            args["command"], result["exit"] = "later", 1
+        finally:
+            release.set()
+        self.assertTrue(client.flush(3.0))
+        self.assertEqual(len(fake.requests), 1)
+        payload = fake.requests[0]["body"]["payload"]
+        self.assertEqual(payload["tool_input"], {"command": "first"})
+        self.assertEqual(json.loads(payload["tool_response"]), {"exit": 0})
+
     def test_events_go_to_the_hosted_server_with_the_key(self):
         fake = FakeClaudeMem()
         self.addCleanup(fake.close)

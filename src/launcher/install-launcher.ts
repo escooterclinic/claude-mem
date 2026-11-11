@@ -13,11 +13,12 @@
  * never used). No `/opt/homebrew/bin` or
  * `/usr/local/bin` symlink (SPIKE Decision 2).
  */
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync } from 'fs';
 import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { homedir } from 'os';
 import { posix as posixPath, win32 as windowsPath } from 'path';
 import { buildSpawnSyncInvocation } from '../shared/spawn.js';
+import { writeTextFileAtomic } from '../shared/atomic-json.js';
 import { sanitizeEnv } from '../supervisor/env-sanitizer.js';
 import { LAUNCHER_PROTOCOL } from './launcher-protocol.js';
 import { MINIMUM_BUN_VERSION_FOR_BUN_BE_BUN, MINIMUM_BUN_VERSION_FOR_SIGNED_LAUNCHER_ON_DARWIN, bunVersionHonoursBunBeBun, bunVersionHonoursMacosSignatureFix } from './bun-be-bun-support.js';
@@ -318,7 +319,9 @@ export function ensureLocalBinOnShellPath(options: {
     try {
       const trailingNewline = existingContent.length === 0 || existingContent.endsWith('\n') ? '' : '\n';
       const appendedBlock = `${trailingNewline}\n${shellPathSetupMarkerComment(purposeLabel)}\n${exportLine}\n`;
-      writeFileSync(configFile, existingContent + appendedBlock, 'utf-8');
+      // The user's own shell rc: a crash mid-write must leave the previous
+      // contents, never a truncated file, so write through the shared helper.
+      writeTextFileAtomic(configFile, existingContent + appendedBlock);
       logger.success(`Added ${purposeLabel} to PATH in ${configFile}`);
       outcome = 'rc-file-updated';
     } catch (error: unknown) {
@@ -498,6 +501,12 @@ export function ensureDirectoryOnWindowsUserPath(options: {
   const host = options.host ?? currentLauncherHostEnvironment();
   const runPowerShell = options.runPowerShell ?? runPowerShellHidden;
 
+  // Already on this process's PATH (inherited from the user or machine Path):
+  // nothing to edit, so no hidden PowerShell spawn, which antivirus
+  // heuristics flag (#5830).
+  const currentProcessPath = host.environmentVariables.PATH ?? '';
+  if (appendDirectoryToWindowsPathValue(currentProcessPath, directory).alreadyPresent) return 'already-on-user-path';
+
   const powerShellResult = runPowerShell(WINDOWS_USER_PATH_APPEND_SCRIPT, {
     [LAUNCHER_DIRECTORY_ENVIRONMENT_VARIABLE]: directory,
   });
@@ -516,7 +525,6 @@ export function ensureDirectoryOnWindowsUserPath(options: {
     logger.info(`Add ${directory} to your user Path (Settings → System → About → Advanced system settings → Environment Variables).`);
     return 'user-path-update-failed';
   }
-  const currentProcessPath = host.environmentVariables.PATH ?? '';
   host.environmentVariables.PATH = appendDirectoryToWindowsPathValue(currentProcessPath, directory).updatedPathValue;
   return outcome;
 }

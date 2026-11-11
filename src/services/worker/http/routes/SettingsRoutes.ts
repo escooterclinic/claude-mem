@@ -14,7 +14,6 @@ import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsMana
 import { clearPortCache } from '../../../../shared/worker-utils.js';
 import { snapshotDependencyHealth } from '../../../../shared/dependency-health.js';
 import { ensureSettingsDocument, updateSettingsDocument } from '../../../../shared/settings-document.js';
-import { isHttpUrl } from '../../../../shared/openrouter-base-url.js';
 import { parseContextCountValue } from '../../../../shared/context-count.js';
 import { OPENROUTER_REASONING_EFFORTS, parseOpenRouterReasoningEffort } from '../../OpenRouterProvider.js';
 import { parseOpenAICompatReasoning } from '../../reasoning-budget.js';
@@ -137,7 +136,9 @@ function withoutEnvironmentEchoes(posted: Record<string, unknown>, settingsPath:
 // version `npx claude-mem@<version> update` installs (the updater reads it
 // from the file alone, never the environment: auto-update-check.ts
 // readAutoUpdateSettings), and CLAUDE_MEM_AUTO_UPDATE decides whether that
-// runs at all.
+// runs at all. Provider endpoints also choose where stored credentials and
+// prompt content go; the compatible preset supplies that destination when
+// its explicit base URL is empty, so it has the same boundary.
 export const FILE_ONLY_SETTING_KEYS = new Set([
   'CLAUDE_CODE_PATH',
   'CLAUDE_MEM_CODEX_PATH',
@@ -146,6 +147,9 @@ export const FILE_ONLY_SETTING_KEYS = new Set([
   'CLAUDE_MEM_WORKER_HOST',
   'CLAUDE_MEM_AUTO_UPDATE',
   'CLAUDE_MEM_AUTO_UPDATE_PROMOTED_RELEASE_URL',
+  'CLAUDE_MEM_OPENROUTER_BASE_URL',
+  'CLAUDE_MEM_OPENAI_COMPAT_BASE_URL',
+  'CLAUDE_MEM_OPENAI_COMPAT_PRESET',
 ]);
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
@@ -314,14 +318,11 @@ export class SettingsRoutes extends BaseRouteHandler {
       'CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED',
       'CLAUDE_MEM_OPENROUTER_API_KEY',
       'CLAUDE_MEM_OPENROUTER_API_KEYS',
-      'CLAUDE_MEM_OPENROUTER_BASE_URL',
       'CLAUDE_MEM_OPENROUTER_MODEL',
       'CLAUDE_MEM_OPENROUTER_SITE_URL',
       'CLAUDE_MEM_OPENROUTER_APP_NAME',
-      // The openai-compatible endpoint, as the viewer edits it. Its key stays
-      // file/env only (CLAUDE_MEM_OPENAI_COMPAT_API_KEY / OPENAI_COMPAT_API_KEY).
-      'CLAUDE_MEM_OPENAI_COMPAT_PRESET',
-      'CLAUDE_MEM_OPENAI_COMPAT_BASE_URL',
+      // Destination and credentials are file/env only. The viewer may still
+      // choose the model and reasoning policy for the configured endpoint.
       'CLAUDE_MEM_OPENAI_COMPAT_MODEL',
       'CLAUDE_MEM_OPENAI_COMPAT_REASONING',
       'CLAUDE_MEM_OPENROUTER_REASONING_EFFORT',
@@ -336,6 +337,7 @@ export class SettingsRoutes extends BaseRouteHandler {
       'CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL',
       'CLAUDE_MEM_WORK_VIEW_CODEX_MODEL',
       'CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL',
+      'CLAUDE_MEM_WORK_VIEW_API_MODEL',
       'CLAUDE_MEM_LOG_LEVEL',
       'CLAUDE_MEM_PYTHON_VERSION',
       'CLAUDE_MEM_CLAUDE_CONFIG_DIR',
@@ -645,7 +647,7 @@ export class SettingsRoutes extends BaseRouteHandler {
 
     if (settings.CLAUDE_MEM_WORK_VIEW_AGENT !== undefined
       && !(WORK_VIEW_AGENT_CHOICES as readonly string[]).includes(settings.CLAUDE_MEM_WORK_VIEW_AGENT)) {
-      return { valid: false, error: 'CLAUDE_MEM_WORK_VIEW_AGENT must be empty (follow CLAUDE_MEM_PROVIDER), "claude-code", "codex", "gemini", "off", or "all"' };
+      return { valid: false, error: 'CLAUDE_MEM_WORK_VIEW_AGENT must be empty (follow CLAUDE_MEM_PROVIDER), "claude-code", "codex", "gemini", "api", "off", or "all"' };
     }
     if (settings.CLAUDE_MEM_WORK_VIEW_COPY_PROVIDER !== undefined
       && !['', 'openrouter', 'openai-compatible', 'off'].includes(settings.CLAUDE_MEM_WORK_VIEW_COPY_PROVIDER)) {
@@ -655,7 +657,7 @@ export class SettingsRoutes extends BaseRouteHandler {
       && (typeof settings.CLAUDE_MEM_WORK_VIEW_COPY_MODEL !== 'string' || settings.CLAUDE_MEM_WORK_VIEW_COPY_MODEL.length > 200)) {
       return { valid: false, error: 'CLAUDE_MEM_WORK_VIEW_COPY_MODEL must be a string of at most 200 characters' };
     }
-    for (const key of ['CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL', 'CLAUDE_MEM_WORK_VIEW_CODEX_MODEL', 'CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL'] as const) {
+    for (const key of ['CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL', 'CLAUDE_MEM_WORK_VIEW_CODEX_MODEL', 'CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL', 'CLAUDE_MEM_WORK_VIEW_API_MODEL'] as const) {
       if (settings[key] !== undefined && (typeof settings[key] !== 'string' || settings[key].length > 200)) {
         return { valid: false, error: `${key} must be a string of at most 200 characters` };
       }
@@ -668,20 +670,6 @@ export class SettingsRoutes extends BaseRouteHandler {
         logger.debug('SETTINGS', 'Invalid URL format', { url: settings.CLAUDE_MEM_OPENROUTER_SITE_URL, error: error instanceof Error ? error.message : String(error) });
         return { valid: false, error: 'CLAUDE_MEM_OPENROUTER_SITE_URL must be a valid URL' };
       }
-    }
-
-    if (settings.CLAUDE_MEM_OPENROUTER_BASE_URL) {
-      if (!isHttpUrl(settings.CLAUDE_MEM_OPENROUTER_BASE_URL)) {
-        logger.debug('SETTINGS', 'Invalid OpenRouter base URL protocol', { url: settings.CLAUDE_MEM_OPENROUTER_BASE_URL });
-        return { valid: false, error: 'CLAUDE_MEM_OPENROUTER_BASE_URL must be an HTTP(S) URL' };
-      }
-    }
-
-    // No preset-id check: the viewer posts the whole settings object, so a
-    // hand-edited unknown preset would 400 every later save, and the worker
-    // already reads an unknown preset as `custom`.
-    if (settings.CLAUDE_MEM_OPENAI_COMPAT_BASE_URL && !isHttpUrl(settings.CLAUDE_MEM_OPENAI_COMPAT_BASE_URL)) {
-      return { valid: false, error: 'CLAUDE_MEM_OPENAI_COMPAT_BASE_URL must be an HTTP(S) URL' };
     }
 
     if (settings.CLAUDE_MEM_CLOUD_SYNC_CONTENT_BATCH_SIZE) {

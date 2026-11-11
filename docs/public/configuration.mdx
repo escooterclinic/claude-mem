@@ -9,6 +9,61 @@ description: "Environment variables and settings for Claude-Mem"
 
 Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created with defaults on first run.
 
+### Choose bundled skills
+
+All bundled skills are enabled by default. To hide unwanted skills from Claude
+Code's listing and slash commands, add their folder names to `settings.json`:
+
+```json
+{
+  "CLAUDE_MEM_SKILLS_DISABLED": "make-plan,do,smart-explore"
+}
+```
+
+A JSON array of names also works. Use bare names such as `make-plan`, not
+`claude-mem:make-plan`. Names are case-sensitive; paths and wildcards are rejected.
+The environment variable `CLAUDE_MEM_SKILLS_DISABLED` overrides the file, including
+an empty value. Save the preference in `settings.json` if it must survive updates
+started by a process that does not inherit your shell's environment.
+
+The installer applies the list to the installed version cache and marketplace
+copy on install, update, and repair. The published package and source checkout
+keep every skill. New skills introduced by an update remain enabled unless named
+in the list. This controls plugin skill discovery, not memory capture or MCP tools.
+
+Four skills always stay enabled, because claude-mem reads their files while it runs.
+If you list one of them, it is left in place and the installer and SessionStart
+hook print a warning naming it:
+
+| Skill              | Read by                                                        |
+|--------------------|----------------------------------------------------------------|
+| `mem-search`       | The `/api/instructions` endpoint and `install --ide codex`     |
+| `how-it-works`     | The viewer's "How it works" explainer                          |
+| `request-progress` | The My Work refresh                                            |
+| `owner-goals`      | The My Work refresh                                            |
+
+Claude Code's SessionStart hook also reapplies the list after marketplace updates
+and settings changes. When it reports that selection changed, restart Claude Code
+to reload its skill listing: the current session may have already loaded the old
+list. Removing a name, or setting the list to `""`, restores that skill through
+the same flow. Other hosts may cache their own copy and need a reinstall/reload.
+
+Skills are moved, not deleted, to `.claude-mem-disabled-skills` beside the installed
+`skills` directory. If an update supplies a new copy in the same directory, the
+older copy is preserved in `.claude-mem-disabled-skills/.history`; enabling the
+skill uses the new copy. These are install-local backups, not a backup of custom
+edits across reinstalls, which already replace the installed plugin tree.
+Use the normal updater rather than overlaying a partial plugin tree: if a partial
+update removes an upstream skill but leaves its parked copy, re-enabling it can
+restore that older copy.
+
+An invalid setting or unsafe path leaves skill content in place and reports the
+problem; install and repair still finish. Symbolic links, foreign backup directories, and incomplete skill
+folders are refused. Concurrent sessions serialize changes with the empty
+`.claude-mem-skill-selection.lock` directory. If a process is killed during a
+change, close the other sessions, inspect the installed tree, remove that empty
+lock directory, and restart to finish applying the saved selection.
+
 ### Core Settings
 
 | Setting                       | Default                         | Description                           |
@@ -36,6 +91,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | `CLAUDE_MEM_SEMANTIC_INJECT_FORMAT` | `narrative`              | `narrative` adds each match's title and full narrative. `index` adds one line per match with its id, title and subtitle and points Claude to `get_observations` for the details. `narrative` is the default because it works without Claude making a tool call: in `index` mode a match it does not expand only contributes its title and subtitle. An `index` line costs a fraction of a narrative, so `index` can carry more matches for the same tokens; pair it with a higher limit. |
 | `CLAUDE_MEM_SEARCH_RECENCY_DAYS` | `90`                      | Date-less semantic search (`search`, `search_observations`, the timeline) only ranks matches created in the last N days; older matches are left out of the answer. `0` turns the window off so every indexed match stays eligible; a larger N widens it. A request that passes `dateStart`/`dateEnd` always uses that range instead of the window. Restart the worker after changing it. |
 | `CLAUDE_MEM_FILE_READ_GATE_ENABLED` | `true`                    | Block whole-file Reads of code files of 32 KB and up that have observation history and send Claude to `smart_outline` / `smart_unfold` / `get_observations` instead (Claude Code only). Targeted Reads with `offset`/`limit` still work. `false` lets every Read through and still adds the file's timeline as context. See [File Read Gate](/file-read-gate). |
+| `CLAUDE_MEM_LINE_ANCHORS_ENABLED` | `false`                     | Opt-in; only `true` turns it on. When the worker stores an observation, it then records in the observation's metadata the path, line number and exact text of up to 3 distinctive lines in the files that observation names, taken from the batch's Claude Code tool calls and never from model output: a line inside the text an `Edit` or `MultiEdit` edit wrote, or a line of a `Read` with an `offset` above 1 that its stored tool response holds. A file's timeline before a Read then ends each such row with where that code is now (`@L212`), found again by its text (exact, then ignoring whitespace), or `(code changed since)` when it is gone or now in more than one place: a line number is never guessed. Off, nothing is recorded or read and the timeline is unchanged. The recorded lines are source text and go wherever the observation goes, Cloud Sync included; secrets in them are left out only when [auto-redaction](/usage/auto-redaction) (`CLAUDE_MEM_REDACT_ENABLED`) is on. Set in `settings.json`, it applies from the next Read and the next stored observation; an environment variable of the same name overrides `settings.json`, and the worker reads its environment only when it starts. See [Line Anchors](/file-read-gate#line-anchors). |
 | `CLAUDE_MEM_WORKER_PORT`      | `37700 + (uid % 100)`           | Worker service port (per-user default; override for fixed port) |
 | `CLAUDE_MEM_WORKER_HOST`      | `127.0.0.1`                     | Worker service host address           |
 | `CLAUDE_MEM_WORKER_URL`       | _(empty)_                       | Explicit client base URL for the worker API; overrides host and port. Use HTTPS for remote workers. Plain HTTP is accepted only on loopback (including a local port forward). A non-empty URL selects HTTP hook-spool delivery in `auto`; invalid URLs fail instead of falling back to host and port. A non-empty URL also turns autostart off on that client, so `CLAUDE_MEM_WORKER_AUTOSTART` does not need setting, and `restart` refuses to run. |
@@ -48,7 +104,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | `CLAUDE_MEM_TV_TOKEN`         | —                               | Shared secret for Observation TV remote access. Empty = off. With a non-loopback `CLAUDE_MEM_WORKER_HOST`, only `/tv`, `/tv.html`, `/stream` and `GET /api/observations` are reachable, and only with this token. |
 | `CLAUDE_MEM_DATA_DIR`         | `~/.claude-mem`                 | Data root — every other path (database, chroma, logs, settings.json, worker.pid) derives from this |
 | `CLAUDE_MEM_SKIP_TOOLS`       | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | Comma-separated tools to exclude from observations |
-| `CLAUDE_MEM_SKIP_BASH_PATTERNS` | —                             | Regular expression matched against each shell command (Claude Code `Bash` and `PowerShell`, Codex `exec_command`); on a match the observation is skipped. Empty captures every command. Use alternation for several patterns, e.g. `^(ls\|cat\|pwd\|git status)\b`. An invalid regex is ignored, so capture is never dropped |
+| `CLAUDE_MEM_SKIP_BASH_PATTERNS` | —                             | Regular expression matched against each shell command (Claude Code `Bash` and `PowerShell`, OpenCode `bash`, Codex `exec_command`); on a match the observation is skipped. Empty captures every command. Use alternation for several patterns, e.g. `^(ls\|cat\|pwd\|git status)\b`. An invalid regex is ignored, so capture is never dropped |
 | `CLAUDE_MEM_SKIP_SUBAGENT_OBSERVATIONS` | `false`               | When `true`, skip **every** subagent observation (a tool call that carries both an agent id and an agent type). See [Subagent & Dynamic Workflow filtering](#subagent--dynamic-workflow-filtering). |
 | `CLAUDE_MEM_CODEX_SUBAGENT_INGESTION` | `false`                 | When `true`, capture the subagent threads Codex CLI spawns, which its native hooks never report, from their rollout files under `~/.codex/sessions`. Off by default: a busy Codex session spawns dozens of subagents a day, and every tool call they make is one more request to your observer provider. `CLAUDE_MEM_SKIP_SUBAGENT_OBSERVATIONS=true` keeps it off. Restart the worker after changing it. |
 | `CLAUDE_MEM_SKIP_AGENT_TYPES` | _(empty)_                       | Comma-separated subagent `agent_type` values to skip, e.g. `workflow-subagent,Explore,Plan`. Main-session observations are unaffected. |
@@ -134,7 +190,7 @@ The worker uses an isolated `codex app-server` session for observations and summ
 | `CLAUDE_MEM_OPENROUTER_API_KEY`              | —                           | OpenRouter API key ([get key](https://openrouter.ai/keys)) |
 | `CLAUDE_MEM_OPENROUTER_API_KEYS`             | —                           | Optional: more keys to rotate through when one is rate-limited, spent or refused ([Multi-Key Rotation](usage/multi-key-rotation)). Never used on the cmem.ai gateway |
 | `CLAUDE_MEM_OPENROUTER_MODEL`                | `cohere/north-mini-code:free` | Model identifier (supports 100+ models) |
-| `CLAUDE_MEM_OPENROUTER_BASE_URL`             | —                           | Optional: custom OpenAI-compatible base URL (DeepSeek, LM Studio, [IO Intelligence](https://io.net)) |
+| `CLAUDE_MEM_OPENROUTER_BASE_URL`             | —                           | Optional: custom OpenAI-compatible base URL (DeepSeek, LM Studio, [IO Intelligence](https://io.net)). Settings file or environment only; the viewer displays it read-only |
 | `CLAUDE_MEM_OPENROUTER_SITE_URL`             | —                           | Optional: URL for analytics           |
 | `CLAUDE_MEM_OPENROUTER_REASONING_EFFORT`     | —                           | Optional: `none`, `minimal`, `low`, `medium` or `high`, openrouter.ai only ([details](usage/openrouter-provider#settings)) |
 | `CLAUDE_MEM_OPENROUTER_APP_NAME`             | `claude-mem`                | Optional: App name for analytics      |
@@ -148,8 +204,8 @@ For `CLAUDE_MEM_PROVIDER=openai-compatible`: any endpoint that speaks `/chat/com
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `CLAUDE_MEM_OPENAI_COMPAT_PRESET` | — | Named endpoint preset ([list](usage/openai-compatible-provider)). Empty = `custom`: set the base URL yourself |
-| `CLAUDE_MEM_OPENAI_COMPAT_BASE_URL` | — | OpenAI-compatible base URL. Overrides the preset's |
+| `CLAUDE_MEM_OPENAI_COMPAT_PRESET` | — | Named endpoint preset ([list](usage/openai-compatible-provider)). Empty = `custom`: set the base URL yourself. Settings file or environment only |
+| `CLAUDE_MEM_OPENAI_COMPAT_BASE_URL` | — | OpenAI-compatible base URL. Overrides the preset's. Settings file or environment only; the viewer displays it read-only |
 | `CLAUDE_MEM_OPENAI_COMPAT_MODEL` | — | Model id, sent as-is. Empty = the preset's default model |
 | `CLAUDE_MEM_OPENAI_COMPAT_OBSERVATION_BATCH_SIZE` | `1` | Queued observations to combine per request (1–32). Default 1 keeps one event per request. Only consecutive events with the same prompt number, agent and working directory are combined, within the model-window character budget. Set in `settings.json` or an environment variable. See [batching trade-offs](usage/openai-compatible-provider#observation-batching). |
 | `CLAUDE_MEM_OPENAI_COMPAT_API_KEY` | — | The key this endpoint issued. Settings file or environment, or `OPENAI_COMPAT_API_KEY` in `~/.claude-mem/.env`; the viewer cannot set it. A local server needs none |
@@ -168,15 +224,16 @@ My Work can generate readable card wording using the configured OpenRouter or Op
 
 ### My Work Refresh Models
 
-The My Work refresh (goals, grouping, review, focus and story steps) runs on one agent CLI: Claude Code, Codex or Gemini (see `CLAUDE_MEM_WORK_VIEW_AGENT` below for which one). By default the light steps (grouping, focus) use a small model and the others a stronger one: `haiku`/`sonnet` on Claude Code, `flash-lite`/`flash` on Gemini, and Codex's CLI default for the careful steps. On Claude Code the refresh runs on your Claude subscription, so set a model here to cap it, for example `haiku`. Each setting puts every step of that agent on one model and is read at the start of every refresh.
+The My Work refresh (goals, grouping, review, focus and story steps) runs on one agent: Claude Code, Codex, Gemini, or the API provider you selected (see `CLAUDE_MEM_WORK_VIEW_AGENT` below for which one). By default the light steps (grouping, focus) use a small model and the others a stronger one: `haiku`/`sonnet` on Claude Code, `flash-lite`/`flash` on Gemini, and Codex's CLI default for the careful steps. On Claude Code the refresh runs on your Claude subscription, so set a model here to cap it, for example `haiku`. Each setting puts every step of that agent on one model and is read at the start of every refresh.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `CLAUDE_MEM_WORK_VIEW_AGENT` | empty | Which agent runs the My Work refresh. Empty uses the agent `CLAUDE_MEM_PROVIDER` names (`claude` → Claude Code, `codex` → Codex, `gemini` → Gemini) and only that one, so a failed run never moves to another agent's quota. A provider that is an API endpoint (`openrouter`, `openai-compatible`, `cmem`) uses the first logged-in agent and only that one. Set `claude-code`, `codex` or `gemini` to pick the agent, `off` to run no agent, or `all` to let a failed run fall through to every other logged-in agent. |
+| `CLAUDE_MEM_WORK_VIEW_AGENT` | empty | Which agent runs the My Work refresh. Empty uses the agent `CLAUDE_MEM_PROVIDER` names (`claude` → Claude Code, `codex` → Codex, `gemini` → Gemini) and only that one, so a failed run never moves to another agent's quota. A provider that is an API endpoint (`openrouter`, `openai-compatible`, `cmem`) uses the first logged-in agent and only that one. Set `api` to run the refresh on the selected API provider; this spends that provider's credit every refresh. Set `claude-code`, `codex` or `gemini` to pick a local agent, `off` to run no agent, or `all` to let a failed run fall through to every other logged-in agent. |
 | `CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL` | empty | Model for every refresh step on Claude Code. Use an alias such as `haiku` or `sonnet`. Empty keeps the per-step defaults. |
 | `CLAUDE_MEM_WORK_VIEW_CODEX_MODEL` | empty | Model id for every refresh step on Codex. Each step keeps its reasoning effort. Empty keeps the per-step defaults. |
 | `CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL` | empty | Model for every refresh step on Gemini, such as `flash-lite`. Empty keeps the per-step defaults. |
-| `CLAUDE_MEM_WORK_VIEW_TEXT_LANGUAGE` | empty | Language for the text the refresh writes (request titles, reviews, focus areas, the story), such as `Turkish`. When set, every step except goals is told to write in it, so separate review batches never pick different languages. Empty lets each step use the language most of your prompts are in. It is never detected by a model, so it costs nothing. |
+| `CLAUDE_MEM_WORK_VIEW_API_MODEL` | empty | Model for every refresh step on the selected API provider, such as `anthropic/claude-sonnet-4`. Empty keeps the model your provider is configured with. |
+| `CLAUDE_MEM_WORK_VIEW_TEXT_LANGUAGE` | empty | Language for the text the refresh writes (request titles, reviews, focus areas, the story), such as `Turkish`. When set, every step except goals is told to write in it, so separate review batches never pick different languages. Empty uses the language most of your asks are written in, decided once per refresh by the grouping step (which already reads them, so it costs no extra model call) and kept for later refreshes that have nothing to group. |
 
 ### Quota Fallback Settings
 
@@ -266,6 +323,7 @@ If an Anthropic-compatible gateway rejects the `thinking` parameter with a 400, 
 | `CLAUDE_MEM_LOG_LEVEL`        | `INFO`                          | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
 | `CLAUDE_MEM_FETCH_VERBOSE`    | _(unset / off)_                 | Opt-in worker-IPC `fetch()` diagnostics (`1`/`true`/`on`/`yes`). Passes Node/undici `{ verbose: true }` and writes the error cause chain on socket-level hook failures. Default stays off. |
 | `CLAUDE_MEM_SESSION_INIT_TIMEOUT_MS` | `10000` (`7000` on Windows) | Total time the UserPromptSubmit hook may spend reaching the worker for each prompt (startup check, session init, semantic context). When it runs out, the prompt goes through without memory for that turn. Accepts 500–14000; it has to stay under Claude Code's 15 s timeout for that hook. The clock starts after the hook process has loaded, which takes 4–5 s on Windows, so on Windows the default is 7000 and any higher value is cut to 7000. Codex keeps its own bounded worker-startup wait, and its requests stay within this budget. Also read from the environment. |
+| `CLAUDE_MEM_HOOK_HANDOFF_TIMEOUT_MS` | `250`                           | Per-event timeout (ms) for live hook observation, file-edit, and summary delivery to the worker. The hook waits up to this long before it exits, so a larger value adds that much to the hook's time on a slow worker. When the deadline expires, the hook skips the event and logs it at `WARN`; nothing is retried or written to a replay spool. Accepts 1–14000 (larger values are cut to 14000, which keeps the hook under Claude Code's 15 s hook timeout). Also read from the environment. |
 | `CLAUDE_MEM_IDLE_EXIT_SEC`    | `0` (off)                       | Opt-in worker idle exit, in seconds. `0` (the default) never exits, and values from 1 to 59 are raised to 60. Once this long passes with no session activity or running observer, no queued work, no open or recent request (a viewer tab, a memory search, a corpus build) and no AI interaction, the worker stops through the same graceful shutdown as `claude-mem stop` (telemetry `shutdown_reason: idle`). The next hook that reads memory, such as session start or your next prompt, starts it again. That first prompt pays a cold start and goes without memory if the boot outlasts the hook's time budget, and observations captured in between wait in the hook spool until the worker is back. Turn it on only where claude-mem's hooks run, such as Claude Code and Codex. Leave it off for OpenCode plugin capture and OpenClaw, which never start the worker, and for MCP-only hosts, where the first memory call after each idle exit waits for a worker boot. It stays off with `CLAUDE_MEM_WORKER_AUTOSTART=false` or while transcript watches are active, since nothing would start the worker again. Cloud sync and transcript capture run only while the worker is up. Also read from the environment. |
 | `CLAUDE_MEM_TOOL_USES_SEARCH_ENABLED` | `false` | Local-only, optional FTS5 index of stored raw tool inputs/responses. Restart the worker after changing this setting. Once built, `search` with `deep:true` can find raw evidence when observation search succeeds with no matches on its first page. Indexing runs in committed batches after core search is ready. Disabling drops only the derived index and its triggers; raw rows remain. See [raw evidence search](/progressive-disclosure#optional-raw-tool-evidence-search) for scope, costs, and failure semantics. |
 | `CLAUDE_MEM_TOOL_USES_RETENTION_DAYS` | `0` (keep forever) | Opt-in retention for the raw tool input/response index behind `get_tool_uses`. With a positive number of days, the worker deletes `tool_uses` rows older than that **and** linked to an observation that still exists, once at start. Rows with no observation, or whose observation was deleted, are the only copy of that tool I/O and are never deleted. A purged id returns the usual not-found result from `get_tool_uses`. Freed pages are reused by SQLite; shrinking the file on disk needs a `VACUUM`. `30` and `"30"` both work. Anything that is not a whole number of days (empty, negative, `abc`) keeps everything. |
