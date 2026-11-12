@@ -215,6 +215,10 @@ var SECRET_PATTERNS = [
   // Pulumi access tokens
   /(?<=\\[nrt]|\b)dp\.pt\.[A-Za-z0-9]{43}(?!\w)/g,
   // Doppler personal tokens
+  /(?<=\\[nrt]|\b)HRKU-AA[0-9A-Za-z_-]{58}(?![\w-])/g,
+  // Heroku API keys
+  /(?<=\\[nrt]|\b)ATATT3[A-Za-z0-9_=-]{186}(?![\w=-])/g,
+  // Atlassian API tokens
   /(?<=\\[nrt]|\b)cmem_[A-Za-z0-9_-]{32,}(?!\w)/g,
   // claude-mem server API keys
   /(?<=\\[nrt]|\b)cm_pro_[A-Za-z0-9_-]{8,}(?!\w)/g,
