@@ -20,10 +20,11 @@ import { buildWorkerUrl, getWorkerPort, getWorkerHost, fetchWithTimeout, resolve
 import { InvalidWorkerUrlError, normalizeWorkerBaseUrl } from '../shared/worker-url.js';
 import { getCurrentWorkerPid, verifyRestartedWorker } from './restart-verify.js';
 import { runShutdownSequence, WORKER_GRACEFUL_SHUTDOWN_DEADLINE_BASE_MS, type WorkerShutdownReason } from './worker-shutdown.js';
-import { DATA_DIR, DB_PATH, USER_SETTINGS_PATH, ensureDir, paths } from '../shared/paths.js';
+import { DATA_DIR, DB_PATH, USER_SETTINGS_PATH, ensurePrivateDir, paths } from '../shared/paths.js';
 import { HookSpool, migrateLegacySessionEndReplay } from '../shared/hook-spool.js';
 import { HookSpoolDrainer, hookSpoolConsumedMarkers } from './worker/hook-spool-drain.js';
 import { pruneOldLogs } from './worker/log-retention.js';
+import { initializeDatabaseWithBusyRetry } from './worker/db-init-retry.js';
 import {
   PLUGIN_CACHE_PRUNE_FIRST_DELAY_MS,
   PLUGIN_CACHE_PRUNE_INTERVAL_MS,
@@ -96,7 +97,7 @@ const packageVersion = typeof __DEFAULT_PACKAGE_VERSION__ !== 'undefined' ? __DE
 export const WORKER_BOOT_FAILED_EXIT_CODE = 78;
 
 /** Subcommands that read or write the caller's project, so they run in its directory (#4628). */
-export const COMMANDS_THAT_ACT_ON_CALLER_PROJECT: ReadonlySet<string> = new Set(['generate', 'clean', 'adopt', 'memory', 'cursor']);
+export const COMMANDS_THAT_ACT_ON_CALLER_PROJECT: ReadonlySet<string> = new Set(['generate', 'clean', 'adopt', 'memory', 'cursor', 'grok', 'aider']);
 
 import {
   writePidFile,
@@ -143,9 +144,13 @@ import { ServerV1Routes } from '../server/routes/v1/ServerV1Routes.js';
 import {
   handleCursorCommand
 } from './integrations/CursorHooksInstaller.js';
+import { handleGrokCommand } from './integrations/GrokBuildInstaller.js';
 import {
   handleKimiCommand
 } from './integrations/KimiHooksInstaller.js';
+import {
+  handleAiderCommand
+} from './integrations/AiderInstaller.js';
 import {
   handleDevinCommand
 } from './integrations/DevinHooksInstaller.js';
@@ -195,6 +200,8 @@ import { HistoryImport } from './setup/history-import.js';
 import { cmemProOrigin } from '../shared/cmem-gateway.js';
 import { Database as BunDatabase } from 'bun:sqlite';
 import { WorkViewRoutes } from './worker/http/routes/WorkViewRoutes.js';
+import { ConversationContinuationRunner } from './work-view/conversation-continuation-runner.js';
+import { detectUsableAgent } from './agent-runner/detect.js';
 import { SessionRoutes } from './worker/http/routes/SessionRoutes.js';
 import { DataRoutes } from './worker/http/routes/DataRoutes.js';
 import { MediaRoutes } from './worker/http/routes/MediaRoutes.js';
@@ -279,7 +286,7 @@ const CLEAN_SHUTDOWN_SENTINEL_PATH = path.join(DATA_DIR, '.worker-clean-shutdown
 
 function writeCleanShutdownSentinel(): void {
   try {
-    ensureDir(DATA_DIR);
+    ensurePrivateDir(DATA_DIR);
     writeFileSync(CLEAN_SHUTDOWN_SENTINEL_PATH, new Date().toISOString());
   } catch (error: unknown) {
     // [ANTI-PATTERN IGNORED]: sentinel is best-effort crash-detection metadata; a failed write must not abort graceful shutdown. Logged at warn with path; worst case the next boot reports 'crash' instead of 'clean'.
@@ -364,6 +371,11 @@ export class WorkerService implements WorkerRef {
   private searchRoutes: SearchRoutes | null = null;
   private corpusRoutes: CorpusRoutes | null = null;
   private workViewRoutes: WorkViewRoutes | null = null;
+  /**
+   * My Work's turns and opens, once the database is ready. Kept apart from workViewRoutes, which shutdown drops at its
+   * first step: the shutdown waits for these commands after that, and force-stops any still running before it exits.
+   */
+  private conversationContinuationRunner: ConversationContinuationRunner | null = null;
   private sharedWorkSync: SharedWorkSync | null = null;
 
   private chromaMcpManager: ChromaMcpManager | null = null;
@@ -1147,7 +1159,10 @@ export class WorkerService implements WorkerRef {
       }
 
       logger.info('WORKER', 'Initializing database manager...');
-      await this.dbManager.initialize();
+      // A replacement worker can boot while another connection is writing
+      // (#3603). SQLITE_BUSY* here is transient, so retry it for a bounded
+      // time (db-init-retry.ts states the budget) before settling on `failed`.
+      await initializeDatabaseWithBusyRetry(this.dbManager, { shouldStop: () => this.isShuttingDown });
       // Shutdown may have begun while initialization was pending.
       if (this.isShuttingDown) return;
 
@@ -1160,6 +1175,21 @@ export class WorkerService implements WorkerRef {
         enabled: settings.CLAUDE_MEM_WORK_VIEW_SHARED_STATE === 'true',
       });
       this.sharedWorkSync.start();
+      // My Work's "continue this conversation": one turn per Send, run by the owner's own CLI. Memory only; it starts
+      // nothing by itself. Every open My Work window is told when an exchange ends, by its id and state only.
+      this.conversationContinuationRunner = new ConversationContinuationRunner({
+        recordedFolderForConversation: (platform, conversationSessionId) =>
+          this.dbManager.getSessionStore().getRecordedFolderForConversation(platform, conversationSessionId),
+        // Checks only the conversation's own CLI: checking Gemini too could start the Gemini CLI on every Send and Open.
+        detectAgent: agentId => detectUsableAgent(agentId),
+        spawnImpl: spawn,
+        onChange: exchange => this.workViewRoutes?.publishConversationContinuation(exchange),
+        // Its turns and opens stay in the supervisor's registry while they run, like every process the worker starts.
+        // shutdown() sends them their stop first (workViewRoutes.close), waits for them alongside the graceful shutdown's
+        // other steps and before its cascade, and force-stops what is left of any still running before the worker exits
+        // or starts its successor.
+        processRegistry: getSupervisor().getRegistry(),
+      });
       this.workViewRoutes = new WorkViewRoutes({
         ...(settings.CLAUDE_MEM_WORK_VIEW_SHARED_STATE === 'true' ? {
           persistSharedCopy: (requestId: string, entry: { fingerprint: string; copy: unknown; generatedAt: number }) => this.sharedWorkSync!.persistCopy(requestId, entry),
@@ -1190,6 +1220,7 @@ export class WorkerService implements WorkerRef {
           origin: () => cmemProOrigin(),
           token: () => SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_CLOUD_SYNC_TOKEN?.trim() || null,
         }),
+        conversationContinuationRunner: this.conversationContinuationRunner,
       });
       this.server.registerRoutes(this.workViewRoutes);
       this.initPhaseTracker.setInitPhase('db_ready');
@@ -1676,6 +1707,9 @@ export class WorkerService implements WorkerRef {
       },
       performGracefulShutdown: () => performGracefulShutdown({
         server: this.server.getHttpServer(),
+        // workViewRoutes.close above sent them their stop: they end on it while the session drain and the other steps run,
+        // and before the supervisor's cascade.
+        commandsStoppedAsShutdownBegan: this.conversationContinuationRunner ?? undefined,
         sessionManager: this.sessionManager,
         mcpClient: this.mcpClient,
         contextReader: { close: async () => { await Promise.all([closeContextReadWorker(), this.deepSearchClient.close()]); } },
@@ -1683,6 +1717,10 @@ export class WorkerService implements WorkerRef {
         chromaMcpManager: this.chromaMcpManager || undefined
       }),
       gracefulDeadlineMs: getPlatformTimeout(WORKER_GRACEFUL_SHUTDOWN_DEADLINE_BASE_MS),
+      // No turn or open My Work started may outlive this worker, however the graceful shutdown ended.
+      forceStopCommandsStillRunning: async () => { await this.conversationContinuationRunner?.forceStopCommandsStillRunning(); },
+      // Nor any other child in the supervisor's registry, when the graceful shutdown did not get to finish its cascade.
+      stopEveryRegisteredChildProcess: () => getSupervisor().stop(),
       restartHandoff: {
         port: getWorkerPort(),
         portFreeTimeoutMs: getPlatformTimeout(5000),
@@ -1798,7 +1836,7 @@ function printWorkerAliasHelp(): never {
 function printWorkerServiceUsage(): void {
   console.error('Usage: worker-service <command>');
   console.error('Commands: start, stop, restart, status, hook <platform> <event>, worker <command>, server <command>,');
-  console.error('  adopt, project, transcript, generate, clean, cleanup, cursor, memory, kimi, devin, antigravity-cli,');
+  console.error('  adopt, project, transcript, generate, clean, cleanup, cursor, grok, memory, kimi, aider, devin, antigravity-cli,');
   console.error('  --daemon, --version, --help');
 }
 
@@ -1863,7 +1901,7 @@ function parseServerApiKeyOptions(args: string[]): Record<string, string> {
 }
 
 function openServerCommandDatabase(): Database {
-  ensureDir(DATA_DIR);
+  ensurePrivateDir(DATA_DIR);
   return openConfiguredSqliteDatabase(DB_PATH, { create: true, readwrite: true });
 }
 
@@ -2292,6 +2330,11 @@ export async function main() {
       break;
     }
 
+    case 'grok': {
+      process.exit(await handleGrokCommand(process.argv[3], process.argv.slice(4)));
+      break;
+    }
+
     case 'memory': {
       // Auto-memory ingest (sibling to transcript). Dry-run runs client-side;
       // the real store reaches the worker over HTTP from inside runMemoryCommand.
@@ -2310,6 +2353,13 @@ export async function main() {
       const kimiSubcommand = process.argv[3];
       const kimiResult = await handleKimiCommand(kimiSubcommand, process.argv.slice(4));
       process.exit(kimiResult);
+      break;
+    }
+
+    case 'aider': {
+      const aiderSubcommand = process.argv[3];
+      const aiderResult = await handleAiderCommand(aiderSubcommand, process.argv.slice(4));
+      process.exit(aiderResult);
       break;
     }
 

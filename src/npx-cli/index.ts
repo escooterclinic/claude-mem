@@ -70,14 +70,18 @@ ${styleText('bold', 'Runtime Commands')} (requires Bun, delegates to installed p
   ${styleText('cyan', 'npx claude-mem project merge <from> <into> [--dry-run]')}    Fold one project's memory into another (non-destructive, syncs)
   ${styleText('cyan', 'npx claude-mem backup run|status|list')}   Manage local DB snapshots
   ${styleText('cyan', 'npx claude-mem restore <file>')}       Restore the DB from a snapshot
+  ${styleText('cyan', 'npx claude-mem import --from mem0 --source-account <label> --user <id> --project <name>')}   Import Mem0 memories (MEM0_API_KEY)
+  ${styleText('cyan', 'npx claude-mem import --from supermemory --source-account <label> --namespace <id> --project <name>')}   Import Supermemory memories (SUPERMEMORY_API_KEY); add --documents for source text, --platform <host> for a host other than Claude Code, or --dry-run to preview
   ${styleText('cyan', 'npx claude-mem transcript watch')}     Start transcript watcher
   ${styleText('cyan', 'npx claude-mem memory ingest [--source <dir> | --all] [--dry-run] [--require-cwd]')}   Import Claude Code auto-memory notes as observations
   ${styleText('cyan', 'npx claude-mem antigravity-cli install|status|uninstall')}   Manage Antigravity CLI hooks + MCP config
   ${styleText('cyan', 'npx claude-mem kimi install|status|uninstall')}   Manage Kimi Code CLI hooks + MCP config
+  ${styleText('cyan', 'npx claude-mem aider install|status|uninstall|sync')}   Manage Aider file-based context
   ${styleText('cyan', 'npx claude-mem gemini install|status|uninstall')}   Manage Gemini CLI capture hooks
   ${styleText('cyan', 'npx claude-mem devin install|status|uninstall')}   Manage Devin CLI / Devin Desktop hooks + MCP
   ${styleText('cyan', 'npx claude-mem t3code status|uninstall [--settings <path>]')}   Inspect or disable T3 Code provider plugins
   ${styleText('cyan', 'npx claude-mem pi install|status|uninstall')}   Manage the native Pi extension
+  ${styleText('cyan', 'npx claude-mem grok install|status|uninstall')}   Load recalled memory into Grok Build sessions (current folder)
 
 ${styleText('bold', 'TeamBrain')} (one shared brain for your team; your own memory stays private):
   ${styleText('cyan', 'npx claude-mem teambrain start')}                Create a team on cmem.ai
@@ -94,7 +98,7 @@ ${styleText('bold', 'Claude Code Hooks')}:
 ${styleText('bold', 'Agent IDs')} (for --ide):
   claude-code, cursor, grok-bot, opencode, openclaw, omp, hermes, pi, dsh,
   windsurf, codex-cli, t3code (aliases: t3, t3-code), kimi, devin, copilot-cli, antigravity, goose,
-  roo-code, warp
+  roo-code, warp, zed
 `);
 }
 
@@ -171,8 +175,8 @@ const HELP_AWARE_COMMANDS = new Set([
   '', 'install', 'update', 'upgrade', 'uninstall', 'remove', 'repair', 'prune',
   'start', 'stop', 'restart', 'status', 'doctor', 'mcp', 'hook',
   'adopt', 'cleanup',
-  'memory', 'telemetry', 'project', 'backup', 'restore', 'server', 'worker', 'transcript',
-  'gemini', 'kimi', 'devin', 'antigravity-cli', 'pi', 't3code', 't3-code', 't3',
+  'memory', 'import', 'telemetry', 'project', 'backup', 'restore', 'server', 'worker', 'transcript',
+  'gemini', 'kimi', 'aider', 'devin', 'antigravity-cli', 'pi', 't3code', 't3-code', 't3', 'grok',
 ]);
 
 async function main(): Promise<void> {
@@ -183,6 +187,11 @@ async function main(): Promise<void> {
   }
 
   switch (command) {
+    case 'import': {
+      const { runImportCommand } = await import('./commands/import-memory.js');
+      await runImportCommand(args.slice(1));
+      break;
+    }
     case '':
     case 'install': {
       const { runInstallCommand } = await import('./commands/install.js');
@@ -320,9 +329,22 @@ async function main(): Promise<void> {
       }
       break;
     }
+    case 'aider': {
+      const { handleAiderCommand } = await import('../services/integrations/AiderInstaller.js');
+      const exitCode = await handleAiderCommand(args[1]?.toLowerCase(), args.slice(2));
+      if (typeof exitCode === 'number') {
+        process.exit(exitCode);
+      }
+      break;
+    }
     case 'devin': {
       const { handleDevinCommand } = await import('../services/integrations/DevinHooksInstaller.js');
       process.exit(await handleDevinCommand(args[1]?.toLowerCase(), args.slice(2)));
+    }
+
+    case 'grok': {
+      const { handleGrokCommand } = await import('../services/integrations/GrokBuildInstaller.js');
+      process.exit(await handleGrokCommand(args[1]?.toLowerCase(), args.slice(2)));
     }
 
     case 'worker': {

@@ -50,6 +50,7 @@
           "usage/private-tags",
           "usage/auto-redaction",
           "usage/export-import",
+          "usage/import-providers",
           "usage/memory-ingest",
           "usage/manual-recovery",
           "usage/folder-context"
@@ -69,6 +70,13 @@
         "icon": "robot",
         "pages": [
           "grok-bot/index"
+        ]
+      },
+      {
+        "group": "Grok Build Integration",
+        "icon": "terminal",
+        "pages": [
+          "grok-build/index"
         ]
       },
       {
@@ -113,9 +121,13 @@
           "hermes-integration",
           "kimi-integration",
           "omo-native-integration",
+          "cline",
           "devin-integration",
+          "kilo",
           "qoder-integration",
+          "zed-integration",
           "screenpipe-integration",
+          "aider-integration",
           "eve-integration",
           "notion-export",
           "obsidian"
