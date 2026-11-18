@@ -404,19 +404,13 @@ export interface SettingsDefaults {
   CLAUDE_MEM_FIELD_OPTIMIZE_TIMEOUT_MS: string;
   CLAUDE_MEM_LLM_STREAM_IDLE_TIMEOUT_MS: string;
   CLAUDE_MEM_WORKER_HEARTBEAT_STALE_MS: string;
-  // Observation TV remote broadcast. EMPTY = OFF: the read-only guard is not
-  // mounted and the worker behaves exactly as before. Set (with a non-loopback
-  // CLAUDE_MEM_WORKER_HOST) to expose ONLY /tv, /tv.html, /stream and
-  // GET /api/observations to holders of this secret. Mint with:
-  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-  CLAUDE_MEM_TV_TOKEN: string;
   // Local API token (#5141), for hosts with more than one OS user. EMPTY = OFF:
   // nothing changes. Set, the worker API and the MCP HTTP transport refuse a
   // request that does not carry it (X-Claude-Mem-Token or Authorization:
   // Bearer), except GET /api/health and the MCP /health. The viewer opens as
   // /?token=... File-only: HTTP cannot write it and the environment does not
-  // switch it. Read once at boot; restart to change. Mint with the same
-  // command as CLAUDE_MEM_TV_TOKEN.
+  // switch it. Read once at boot; restart to change. Mint with:
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
   CLAUDE_MEM_LOCAL_API_TOKEN: string;
   // claude-mem sign-in funnel state, written by the installer's browser-login
   // step (install.ts promptBrowserLogin/completeTrialPairing). Declared here so
@@ -657,7 +651,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'true',
     CLAUDE_MEM_WELCOME_HINT_ENABLED: 'true',
     CLAUDE_MEM_WORK_STATE_ENABLED: 'true',  // 'false' = no work-state section at SessionStart and no work_state_* MCP tools, for hosts that track work their own way
-    CLAUDE_MEM_AUTO_CLEAR_ENABLED: 'false', // Claude Code mod (plugin/hooks/auto-clear.js): at CLAUDE_MEM_AUTO_CLEAR_PERCENT of the context window, Claude saves its work state, then /clear runs and a continuation prompt built from that save is sent ("continue" when the save left its blanks out). Off unless set to 'true'. Needs work state on
+    CLAUDE_MEM_AUTO_CLEAR_ENABLED: 'false', // Claude Code mod (src/mods/auto-clear, in plugin/hooks/hooks-module.js): at CLAUDE_MEM_AUTO_CLEAR_PERCENT of the context window, Claude saves its work state, then /clear runs and a continuation prompt built from that save is sent ("continue" when the save left its blanks out). Off unless set to 'true'. Needs work state on
     CLAUDE_MEM_AUTO_CLEAR_PERCENT: '40',    // Context window use (1-95) that starts the auto-clear. 40: the maintainer's choice (raised from 33 on 2026-11-17); src/mods/auto-clear/settings.ts keeps the same value
     CLAUDE_MEM_FILE_READ_GATE_ENABLED: 'true',  // 'false' = never block a full-file Read; the file's observation timeline is still added as context
     CLAUDE_MEM_LINE_ANCHORS_ENABLED: 'false',  // #4943, opt-in: the worker records line anchors in observation metadata and the file-context timeline shows where that code is now (@L123) or "(code changed since)". Only 'true' turns it on
@@ -753,12 +747,6 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_FIELD_OPTIMIZE_TIMEOUT_MS: String(DEFAULT_LLM_TIMEOUT_MS),  // Oversized-field condensation deadline (field-optimizer.ts); a request to the same backend, so the same deadline
     CLAUDE_MEM_LLM_STREAM_IDLE_TIMEOUT_MS: '90000',  // Streamed request idle window (streamed-chat-completion.ts): silence that ends a stream. Self-hosted backends queue behind a load balancer, and the queue wait reads as idle (#4737) — raise it there. Literal because shared cannot import from the worker; a drift test pins it to the shipped constant
     CLAUDE_MEM_WORKER_HEARTBEAT_STALE_MS: '120000', // A silent worker whose liveness heartbeat is younger than this is slow, not dead (10000-3600000).
-    // Observation TV remote broadcast. EMPTY = OFF: the read-only guard is not
-    // mounted and the worker behaves exactly as before. Set (with a non-loopback
-    // CLAUDE_MEM_WORKER_HOST) to expose ONLY /tv, /tv.html, /stream and
-    // GET /api/observations to holders of this secret. Mint with:
-    //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-    CLAUDE_MEM_TV_TOKEN: '',
     CLAUDE_MEM_LOCAL_API_TOKEN: '', // Local API token. Empty = off. See the declaration above.
     // claude-mem sign-in funnel state: all empty until the installer's
     // browser-login step writes them.
