@@ -177,6 +177,7 @@ import { holdSpawnLock, SPAWN_LOCK_STALE_MS } from '../../shared/worker-spawn-ga
 import { readOwnedWorkerPidInfo, type PidInfo } from '../../supervisor/process-registry.js';
 import { isWorkerAutostartDisabled } from '../../shared/worker-autostart.js';
 import { isInstallRunByAutoUpdate } from '../../shared/auto-update-install-run.js';
+import { stripLegacyClaudeMemAlias } from './uninstall.js';
 import { detectInstalledIDEs } from './ide-detection.js';
 import { initialIDESelection } from './ide-detection.js';
 import { canonicalIntegrationId } from '../../shared/integration-id.js';
@@ -868,11 +869,10 @@ export function browserInstallCatalog(options: InstallOptions, reinstall: boolea
       claudeModel,
       ...(options.dshProfile ? { dshProfile: options.dshProfile } : {}),
     },
-    // The catalog is served to localhost pages, so it says only that a signup exists, never its address.
-    signupSaved: readStoredSignup() !== null,
     telemetryLocked: !!process.env.CI || consent.source === 'DO_NOT_TRACK' || consent.source === 'env',
     skillsLocked: process.env.CLAUDE_MEM_SKILLS_DISABLED !== undefined,
-    emailEnabled: !process.env.CI && String(process.env.CLAUDE_MEM_ONLINE_OPTIN ?? '').trim().toLowerCase() !== 'false',
+    // Older setup pages also honor this flag. The terminal owns the signup.
+    emailEnabled: false,
   };
 }
 
@@ -881,7 +881,8 @@ function browserModelChoice(selection: SetupInstallSelection, catalog: SetupInst
   return selection.claudeModel && selection.claudeModel !== catalog.defaults.claudeModel ? selection.claudeModel : current;
 }
 
-async function applyBrowserEmail(selection: SetupInstallSelection, version: string): Promise<void> {
+/** Finish an opt-in already entered into a pending setup from an older installer. */
+async function applyLegacyBrowserEmail(selection: SetupInstallSelection, version: string): Promise<void> {
   const email = selection.email?.trim();
   if (!email) return;
   const note = selection.note?.trim() ?? '';
@@ -3298,8 +3299,8 @@ async function runInstallCommandInner(options: InstallOptions, summary: InstallS
   });
   const resumedState = resumeSetup ? readSetupState() : null;
   if (resumeSetup && !resumedState?.install) throw new Error('There is no deferred setup to resume.');
+  if (!options.update && !deferSetup && !resumeSetup) await promptEmailOptIn(version);
   const installCatalog = resumedState?.install?.catalog ?? (browserSetup ? browserInstallCatalog(options, alreadyInstalled) : null);
-  if (!browserSetup && !options.update) await promptEmailOptIn(version);
 
   if (alreadyInstalled && !browserSetup && !options.update) {
     if (process.stdin.isTTY) {
@@ -3314,6 +3315,15 @@ async function runInstallCommandInner(options: InstallOptions, summary: InstallS
       }
     }
   }
+
+  // A pre-12.4.7 `alias claude-mem=` in the shell rc beats PATH, so it shadows
+  // the launcher and roots the CLI — and, through `start`, the worker — in
+  // the marketplace clone (#6228). Uninstall already strips it; install and
+  // update are the commands a user carrying the alias actually runs, so strip
+  // it here too. The strip runs only after the overwrite confirmation above:
+  // declining or cancelling a reinstall must leave the user's shell files
+  // exactly as they were. The strip prints one line per file it rewrites.
+  stripLegacyClaudeMemAlias();
 
   let selectedIDEs: string[];
   if (options.ide) {
@@ -3604,7 +3614,7 @@ async function runInstallCommandInner(options: InstallOptions, summary: InstallS
                 if (!selection.disableAutoMemory) enableClaudeAutoMemory();
               }
               if (!installCatalog!.telemetryLocked) recordTelemetryDecision(selection.telemetryEnabled);
-              if (installCatalog!.emailEnabled) await applyBrowserEmail(selection, version);
+              if (resumedState?.install?.catalog.emailEnabled) await applyLegacyBrowserEmail(selection, version);
             },
           },
           applyChoice: async (choice, state) => {

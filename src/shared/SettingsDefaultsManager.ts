@@ -374,9 +374,11 @@ export interface SettingsDefaults {
   CLAUDE_MEM_CHROMA_PREWARM_TIMEOUT_MS: string;
   CLAUDE_MEM_CHROMA_MUTATION_TIMEOUT_MS: string;
   CLAUDE_MEM_CHROMA_MAX_PENDING_MUTATIONS: string;
+  CLAUDE_MEM_CHROMA_BACKFILL_PAUSE_RATIO: string; // bulk backfill sleeps write-time x ratio per row; 0 = off, 0-10
+  CLAUDE_MEM_CHROMA_PROCESS_NICE: string;         // niceness for chroma-mcp (non-Windows, needs `nice`); 0 = off, 0-19
   CLAUDE_MEM_CHROMA_EMBEDDING_FUNCTION: string;  // chroma-mcp embedding function for new collections
   CLAUDE_MEM_SERVER_VECTOR_SEARCH: string;       // server search by meaning: 'auto', 'true' or 'false'
-  CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS: string; // CPU threads for embedding stored rows; '' = half, 0 = all
+  CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS: string; // hosted server only (local Chroma's embedder can't be capped from claude-mem): CPU threads for embedding stored rows; '' = half, 0 = all
   CLAUDE_MEM_EMBEDDING_MODEL: string;            // in-process embedding model for server search by meaning
   CLAUDE_MEM_CHROMA_UVX_PATH: string;            // uvx binary (or its folder) to launch chroma-mcp with
   CLAUDE_MEM_SEARCH_RECENCY_DAYS: string;        // Implicit 90-day recency window on date-less semantic searches (#4770); 0 = no window
@@ -449,6 +451,7 @@ export interface SettingsDefaults {
   CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL: string;
   CLAUDE_MEM_WORK_VIEW_CODEX_MODEL: string;
   CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL: string;
+  CLAUDE_MEM_WORK_VIEW_OPENCODE_MODEL: string;
   CLAUDE_MEM_WORK_VIEW_API_MODEL: string;
   CLAUDE_MEM_CORPUS_AGENT: string;
   CLAUDE_MEM_API_AGENT_EXTRA_BODY: string;
@@ -703,6 +706,8 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_CHROMA_PREWARM_TIMEOUT_MS: '120000',
     CLAUDE_MEM_CHROMA_MUTATION_TIMEOUT_MS: '600000', // Chroma embedding/index writes can exceed the MCP SDK's 60s default
     CLAUDE_MEM_CHROMA_MAX_PENDING_MUTATIONS: '5000', // Bound burst imports without changing normal live indexing
+    CLAUDE_MEM_CHROMA_BACKFILL_PAUSE_RATIO: '1',     // Bulk backfill sleeps (row write time x ratio) after each row: 1 = at most ~50% duty, 0 = off, max 10. Live sync is never paced
+    CLAUDE_MEM_CHROMA_PROCESS_NICE: '10',            // chroma-mcp starts as `nice -n N uvx ...` where `nice` exists (not Windows). 0 = off, max 19
     // Embedding function used when creating the Chroma collection. 'default' is
     // the local all-MiniLM-L6-v2 (English-tuned). The pinned chroma-mcp also
     // accepts 'openai', 'cohere', 'jina', 'voyageai' and 'roboflow'; those are
@@ -720,7 +725,10 @@ export class SettingsDefaultsManager {
     // current model (search by meaning just turned on, or the model changed)
     // embeds them in the background, which can take hours on a large store.
     // That start caps the embedder at this many CPU threads until the next
-    // restart: empty is half the machine's threads, 0 is every thread.
+    // restart: empty is half the machine's threads, 0 is every thread. This
+    // applies to the hosted server only: local Chroma's embedder runs inside
+    // chroma-mcp and cannot be capped from claude-mem (see
+    // CLAUDE_MEM_CHROMA_PROCESS_NICE and CLAUDE_MEM_CHROMA_BACKFILL_PAUSE_RATIO).
     CLAUDE_MEM_EMBEDDING_BACKFILL_THREADS: '',
     // Embedding model the server's search by meaning uses: a key of
     // EMBEDDING_MODELS in src/services/vector/models.ts, which lists them and
@@ -772,10 +780,11 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_WORK_VIEW_SHARED_STATE: 'false', // Enable only after all local/cloud readers understand reserved My Work records.
     CLAUDE_MEM_WORK_VIEW_COPY_PROVIDER: '', // '' uses OpenRouter only when it is the primary provider; openrouter/openai-compatible explicitly select that provider; off disables generated My Work copy
     CLAUDE_MEM_WORK_VIEW_COPY_MODEL: '', // Optional model override for generated My Work copy; empty uses the selected provider's configured model
-    CLAUDE_MEM_WORK_VIEW_AGENT: '', // Which agent runs the My Work refresh: '' follows CLAUDE_MEM_PROVIDER and stays on one agent; claude-code/codex/gemini pick one; off runs none; all falls through every logged-in agent (#5189)
+    CLAUDE_MEM_WORK_VIEW_AGENT: '', // Which agent runs the My Work refresh: '' follows CLAUDE_MEM_PROVIDER and stays on one agent; claude-code/codex/gemini/opencode pick one; off runs none; all falls through every logged-in agent (#5189)
     CLAUDE_MEM_WORK_VIEW_CLAUDE_MODEL: '', // #5164 — model for every My Work refresh step on Claude Code (an alias like 'haiku'); empty keeps haiku/sonnet per step
     CLAUDE_MEM_WORK_VIEW_CODEX_MODEL: '',  // #5164 — same for Codex; empty keeps the per-step table
     CLAUDE_MEM_WORK_VIEW_GEMINI_MODEL: '', // #5164 — same for Gemini; empty keeps flash-lite/flash per step
+    CLAUDE_MEM_WORK_VIEW_OPENCODE_MODEL: '', // #5535 — model for every My Work refresh step on OpenCode ('provider/model'); empty uses OpenCode's configured default
     CLAUDE_MEM_WORK_VIEW_API_MODEL: '', // Model for every My Work refresh step on the selected API provider; empty keeps the provider's configured model
     CLAUDE_MEM_CORPUS_AGENT: '', // Which agent answers knowledge-corpus prime/query/reprime: '' uses the Claude Agent SDK (the Claude subscription); 'api' answers over chat completions on the selected openrouter/openai-compatible provider and spends that provider's credit
     CLAUDE_MEM_API_AGENT_EXTRA_BODY: '', // JSON object merged into every api agent request (My Work refresh, corpus), e.g. {"chat_template_kwargs":{"enable_thinking":false}} for vLLM (#6223). Parsed like CLAUDE_MEM_OPENROUTER_EXTRA_BODY; never sets reasoning or response_format. File/env only

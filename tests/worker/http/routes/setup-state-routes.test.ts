@@ -1,8 +1,10 @@
-import { afterAll, afterEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, describe, expect, it, spyOn } from 'bun:test';
 import express from 'express';
 import type { Server } from 'node:http';
+import * as fs from 'node:fs';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { logger } from '../../../../src/utils/logger.js';
 import { defaultAutoRefresh, WorkViewRoutes } from '../../../../src/services/worker/http/routes/WorkViewRoutes.js';
 import { SETUP_DSH_PROFILE_MAX_CHARACTERS, SETUP_INSTALL_NOTE_MAX_CHARACTERS, type SetupInstallCatalog } from '../../../../src/shared/setup-install.js';
 
@@ -327,6 +329,41 @@ describe('setup state endpoints', () => {
     for (phase of ['idle', 'done', 'failed', 'awaiting-consent']) expect(testRoutes.setupIsActive()).toBe(false);
   });
 
+  it('keeps local work paused without an error while the machine has no free file descriptors, and reads again on every tick', async () => {
+    await start();
+    writeFileSync(statePath, JSON.stringify({ status: 'pending' }));
+    const testRoutes = routes as unknown as { setupIsActive: () => boolean };
+    let code = 'EMFILE';
+    const read = spyOn(fs, 'readFileSync').mockImplementation(() => { throw Object.assign(new Error(`${code}: too many open files`), { code }); });
+    const warn = spyOn(logger, 'warn').mockImplementation(() => {});
+    const exhaustionWarnings = () => warn.mock.calls.filter(([, message]) => String(message).includes('no file descriptors are free')).length;
+    try {
+      expect(testRoutes.setupIsActive()).toBe(true);
+      expect(testRoutes.setupIsActive()).toBe(true);
+      expect(read).toHaveBeenCalledTimes(2);
+      code = 'ENFILE';
+      expect(testRoutes.setupIsActive()).toBe(true);
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(exhaustionWarnings()).toBe(1);
+      code = 'EACCES';
+      expect(() => testRoutes.setupIsActive()).toThrow('EACCES');
+      read.mockRestore();
+      expect(testRoutes.setupIsActive()).toBe(false);
+      // A new episode after a successful read warns again.
+      code = 'EMFILE';
+      const readAgain = spyOn(fs, 'readFileSync').mockImplementation(() => { throw Object.assign(new Error(`${code}: too many open files`), { code }); });
+      try {
+        expect(testRoutes.setupIsActive()).toBe(true);
+        expect(exhaustionWarnings()).toBe(2);
+      } finally {
+        readAgain.mockRestore();
+      }
+    } finally {
+      read.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('report a setup scan as extraction in every phase until it ends, the upload question included (the installer holds any restart for it)', async () => {
     await start();
     // A scan in a given phase, set the way the setupIsActive test above sets one.
@@ -346,6 +383,19 @@ describe('setup state endpoints', () => {
     expect((await state()).backgroundWorkRunning).toEqual([]);
     status = { state: 'ok', pid: process.pid };
     expect((await state()).backgroundWorkRunning).toEqual([]);
+  });
+
+  it('report no extraction run, and still answer, when refresh.json cannot be read', async () => {
+    await start({ status: () => { throw new SyntaxError('JSON Parse error: Unrecognized token'); }, start() {}, close() {}, async runNow() { return 'idle'; } });
+    const response = await fetch(`${origin}/api/setup/state`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).backgroundWorkRunning).toEqual([]);
+  });
+
+  it('fail the setup state request when refresh.json cannot be opened for a reason other than unreadable bytes', async () => {
+    await start({ status: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); }, start() {}, close() {}, async runNow() { return 'idle'; } });
+    const response = await fetch(`${origin}/api/setup/state`);
+    expect(response.status).toBe(500);
   });
 
   it('report an existing CMEM Pro configuration so On The Go is pre-selected', async () => {
