@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import type { spawn } from 'child_process';
 import { codexModelForLogin, GEMINI_NO_MCP_SERVERS, readOpenCodeUserConfig, runAgentTask, type AgentTask } from '../../../src/services/agent-runner/run.js';
-import type { UsableAgent } from '../../../src/services/agent-runner/detect.js';
+import { detectUsableAgent, type UsableAgent } from '../../../src/services/agent-runner/detect.js';
 
 class FakeStream extends EventEmitter {
   setEncoding(): this { return this; }
@@ -271,7 +271,7 @@ describe('agent runner', () => {
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
-  it('Codex: a model the login refuses at run time is retried once on the login default model (Oct 25: model_not_found)', async () => {
+  it.each(['win32', 'linux'] as const)('Codex on %s retries a refused model with the same sandbox configuration', async (platform) => {
     const cwd = mkdtempSync(join(tmpdir(), 'agent-runner-codex-refused-'));
     try {
       const calls: SpawnCall[] = [];
@@ -286,12 +286,18 @@ describe('agent runner', () => {
       });
       // No models list in CODEX_HOME, so the step's model is sent as named and refused.
       const lightTask: AgentTask = { ...task(cwd), run: async ask => ask('prompt', LIGHT_MODELS) };
-      const result = await runTask(lightTask, { detect: async () => agents('codex'), query: neverQuery, spawn: spawnImpl, buildEnv: async () => ({ ...(await env()), CODEX_HOME: join(cwd, 'no-codex-home') }) });
+      const result = await runTask(lightTask, { detect: async () => agents('codex'), query: neverQuery, spawn: spawnImpl, platform: () => platform, buildEnv: async () => ({ ...(await env()), CODEX_HOME: join(cwd, 'no-codex-home') }) });
       expect(result.state).toBe('ok');
       expect(calls).toHaveLength(2);
       expect(calls[0].args).toContain('-m');
       expect(calls[1].args).not.toContain('-m');
       expect(calls[1].args.join(' ')).not.toContain('model_reasoning_effort');
+      for (const { args } of calls) {
+        expect(args.includes('features.prefer_mxc=true')).toBe(platform === 'win32');
+        expect(args).toContain('--ignore-user-config');
+        expect(args).toContain('permissions.claude-mem-refresh.network.enabled=false');
+        expect(args.find(arg => arg.startsWith('permissions.claude-mem-refresh.filesystem='))).toContain('":root"="deny"');
+      }
     } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
@@ -388,6 +394,58 @@ describe('agent runner', () => {
       expect(runEnv.OPENCODE_CONFIG_DIR).toBe(join(isolated, 'opencode'));
       expect(existsSync(isolated)).toBe(false);
     } finally { rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    { source: 'shell key', legacy: false, settings: '', key: 'shell-key', base: undefined, token: undefined },
+    { source: 'configured gateway on a legacy CLI', legacy: true, settings: 'ANTHROPIC_BASE_URL=https://gateway.example\nANTHROPIC_AUTH_TOKEN=gateway-token',
+      key: undefined, base: 'https://gateway.example', token: 'gateway-token' },
+  ])('OpenCode uses the same $source for auth list and the refresh command', async ({ legacy, settings, key, base, token }) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'opencode-credentials-'));
+    const saved = {
+      CLAUDE_MEM_ENV_FILE: process.env.CLAUDE_MEM_ENV_FILE, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+      CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    };
+    try {
+      process.env.CLAUDE_MEM_ENV_FILE = join(cwd, '.env');
+      writeFileSync(process.env.CLAUDE_MEM_ENV_FILE, 'CLAUDE_CODE_OAUTH_TOKEN=claude-only\n' + settings);
+      process.env.ANTHROPIC_API_KEY = 'shell-key';
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'parent-claude-only';
+      delete process.env.ANTHROPIC_BASE_URL;
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+      const calls: SpawnCall[] = [];
+      const spawn = fakeSpawn(calls, ({ args, child }) => {
+        if (args[0] === 'auth') {
+          if (legacy && args.includes('--format')) { child.emit('close', 1); return; }
+          child.stdout.emit('data', legacy ? '1 credential' : '[{"connections":[{"type":"env","name":"ANTHROPIC_API_KEY"}]}]');
+        } else if (args[0] === 'run') {
+          child.stdout.emit('data', '{"type":"text","part":{"type":"text","text":"done"}}');
+        } else {
+          child.stdout.emit('data', '/bin/opencode');
+        }
+        child.emit('close', 0);
+      });
+      const result = await runTask(task(cwd), {
+        detect: async () => [await detectUsableAgent('opencode', { spawn, platform: () => 'linux' })],
+        spawn, query: neverQuery, opencodeUserConfig: () => ({}),
+      });
+      expect(result.state).toBe('ok');
+      const commands = calls.filter(call => call.command === '/bin/opencode');
+      expect(commands.map(call => call.args[0])).toEqual(legacy ? ['auth', 'auth', 'run'] : ['auth', 'run']);
+      for (const call of commands) {
+        const env = (call.options.env as NodeJS.ProcessEnv | undefined) ?? process.env;
+        expect(env.ANTHROPIC_API_KEY).toBe(key);
+        expect(env.ANTHROPIC_BASE_URL).toBe(base);
+        expect(env.ANTHROPIC_AUTH_TOKEN).toBe(token);
+        expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      }
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it('OpenCode: only the default model and providers come from the user config, and JSONC parses', () => {

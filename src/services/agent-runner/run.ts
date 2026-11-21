@@ -39,7 +39,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir, tmpdir } from 'os';
 import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import { query, type CanUseTool, type Options, type SdkPluginConfig } from '@anthropic-ai/claude-agent-sdk';
-import { buildIsolatedEnvWithFreshOAuth } from '../../shared/EnvManager.js';
+import { buildIsolatedEnvWithFreshOAuth, buildOpenCodeEnv } from '../../shared/EnvManager.js';
 import { stripJsonComments, stripUtf8Bom } from '../../shared/atomic-json.js';
 import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 import { logger } from '../../utils/logger.js';
@@ -130,14 +130,15 @@ export interface AgentRunnerDependencies {
   /** Environment for the agent process: the worker's isolated credentials, never tracked by claude-mem's own hooks.
    * Built fresh for every step: a run can outlive the OAuth access token it started with (Oct 22: the Mac slept
    * 11 hours mid-run, and the token injected at the start was revoked by the time the next step asked). */
-  buildEnv: () => Promise<NodeJS.ProcessEnv>;
+  buildEnv: (agent: TaskAgentId) => Promise<NodeJS.ProcessEnv>;
   /** Runtime platform, injectable so the Windows confinement gate is regression-testable. */
   platform: () => NodeJS.Platform;
   /** The user's own OpenCode default model and custom providers, kept in an otherwise isolated run. */
   opencodeUserConfig?: () => { model?: string; provider?: Record<string, unknown> };
 }
 
-async function defaultEnv(): Promise<NodeJS.ProcessEnv> {
+async function defaultEnv(agent: TaskAgentId): Promise<NodeJS.ProcessEnv> {
+  if (agent === 'opencode') return buildOpenCodeEnv();
   // CLAUDE_MEM_INTERNAL=1 keeps claude-mem's hooks from recording this run as
   // the owner's own work, so a refresh never makes itself due again.
   return { ...sanitizeEnv(await buildIsolatedEnvWithFreshOAuth()), CLAUDE_MEM_INTERNAL: '1' };
@@ -189,7 +190,7 @@ function claudeCodeAsk(agent: TaskAgent, task: AgentTask, dependencies: AgentRun
     return { behavior: 'deny', message: `${toolName} is not available to this read-only step.` };
   };
   return async (prompt, models) => {
-    const env = await dependencies.buildEnv();
+    const env = await dependencies.buildEnv(agent.id);
     let stderr = '';
     const options: Options = {
       pathToClaudeCodeExecutable: agent.path!,
@@ -247,8 +248,11 @@ function failure(name: string, result: CommandResult): Error {
  * `--ignore-user-config` skips that file, so the run has no MCP tools; auth
  * still comes from CODEX_HOME. Every save goes through the worker's validators.
  */
-const CODEX_EXEC_ARGS = (executable: string, cwd: string, answerPath: string, schemaPath: string | null, { model, reasoningEffort }: StepModel = {}) => [
-  'exec', '--strict-config', '-c', 'default_permissions="claude-mem-refresh"',
+const CODEX_EXEC_ARGS = (executable: string, cwd: string, answerPath: string, schemaPath: string | null, platform: NodeJS.Platform, { model, reasoningEffort }: StepModel = {}) => [
+  'exec', '--strict-config',
+  // The isolated launch ignores user config, including its Windows sandbox preference.
+  ...(platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
+  '-c', 'default_permissions="claude-mem-refresh"',
   '-c', `permissions.claude-mem-refresh.filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="read"},${runtimeReadRoots(executable).map(path => `${JSON.stringify(path)}="read"`).join(',')}}`,
   '-c', 'permissions.claude-mem-refresh.network.enabled=false', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-C', cwd, '-o', answerPath,
   ...(schemaPath ? ['--output-schema', schemaPath] : []), ...(model ? ['-m', model] : []), ...(reasoningEffort ? ['-c', `model_reasoning_effort="${reasoningEffort}"`] : []), '-',
@@ -292,7 +296,7 @@ export function codexModelForLogin(step: StepModel | undefined, env: NodeJS.Proc
 
 function codexAsk(agent: TaskAgent, task: AgentTask, dependencies: AgentRunnerDependencies): AskAgent {
   return async (prompt, models, answerSchema) => {
-    const env = await dependencies.buildEnv();
+    const env = await dependencies.buildEnv(agent.id);
     const directory = join(task.cwd, 'agent-runs');
     mkdirSync(directory, { recursive: true });
     const id = randomBytes(6).toString('hex');
@@ -305,17 +309,18 @@ function codexAsk(agent: TaskAgent, task: AgentTask, dependencies: AgentRunnerDe
       // macOS sandbox-exec must reopen the actual binary, not its PATH symlink.
       const executable = realPath(agent.path!);
       const model = codexModelForLogin(models.codex, env);
-      let result = await runCli(executable, CODEX_EXEC_ARGS(executable, task.cwd, answerPath, schemaPath, model), prompt, { cwd: task.cwd, env });
+      const platform = dependencies.platform();
+      let result = await runCli(executable, CODEX_EXEC_ARGS(executable, task.cwd, answerPath, schemaPath, platform, model), prompt, { cwd: task.cwd, env });
       // The models list can be missing or stale, so a login can still refuse the step's model. Then the
       // step runs once more on the login's default model instead of failing (Oct 25: gpt-6-luna).
       if (result.exitCode !== 0 && model?.model && CODEX_MODEL_REFUSED.test(`${result.stderr}\n${result.stdout}`)) {
         logger.warn('WORKER', `Codex refused ${model.model} for this login; retrying on its default model`);
-        result = await runCli(executable, CODEX_EXEC_ARGS(executable, task.cwd, answerPath, schemaPath, {}), prompt, { cwd: task.cwd, env });
+        result = await runCli(executable, CODEX_EXEC_ARGS(executable, task.cwd, answerPath, schemaPath, platform), prompt, { cwd: task.cwd, env });
       }
       if (result.exitCode !== 0) {
         // Recognize the actual capability refusal rather than disabling Codex
         // on every Windows machine: elevated/MXC installations may support it.
-        if (dependencies.platform() === 'win32'
+        if (platform === 'win32'
           && /unelevated restricted-token sandbox cannot enforce split filesystem read restrictions/i.test(`${result.stderr}\n${result.stdout}`)) {
           throw new Error('Codex refused this refresh because its Windows unelevated sandbox cannot enforce the required read restrictions. Use an administrator-provisioned elevated sandbox or a supported MXC sandbox. The existing provider fallback remains available; filesystem restrictions were preserved.');
         }
@@ -331,7 +336,7 @@ function codexAsk(agent: TaskAgent, task: AgentTask, dependencies: AgentRunnerDe
 
 function geminiAsk(agent: TaskAgent, task: AgentTask, dependencies: AgentRunnerDependencies): AskAgent {
   return async (prompt, models) => {
-    const env = await dependencies.buildEnv();
+    const env = await dependencies.buildEnv(agent.id);
     const model = models.gemini?.model;
     const policyDir = mkdtempSync(join(tmpdir(), 'claude-mem-gemini-policy-'));
     const policyPath = join(policyDir, 'settings.json');
@@ -425,7 +430,7 @@ export function readOpenCodeUserConfig(): { model?: string; provider?: Record<st
  */
 function opencodeAsk(agent: TaskAgent, _task: AgentTask, dependencies: AgentRunnerDependencies): AskAgent {
   return async (prompt, models) => {
-    const env = await dependencies.buildEnv();
+    const env = await dependencies.buildEnv(agent.id);
     const model = models.opencode?.model;
     const userConfig = (dependencies.opencodeUserConfig ?? readOpenCodeUserConfig)();
     const configHome = mkdtempSync(join(tmpdir(), 'claude-mem-opencode-'));
