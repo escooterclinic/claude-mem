@@ -36,7 +36,7 @@ import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { getUptimeSeconds } from '../shared/uptime.js';
 import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
 import { readLocalApiToken } from '../shared/hook-settings.js';
-import { readLegacyTvToken, resolveWorkerBindHost } from './worker/worker-bind-host.js';
+import { readLegacyTvToken, resolveWorkerBindHost, warnOnPlainHttpRemoteTokenHost } from './worker/worker-bind-host.js';
 import { describeObserverAuthMethod } from './worker/observer-auth-method.js';
 import { logger } from '../utils/logger.js';
 import { isHookStdoutClosed } from '../shared/hook-io.js';
@@ -1024,6 +1024,16 @@ export class WorkerService implements WorkerRef {
       localApiTokenSet: this.localApiTokenEnabled,
     });
 
+    // The token crosses a plain-HTTP hop only when the user names a remote host
+    // (#6390): say so, once, at boot.
+    warnOnPlainHttpRemoteTokenHost({
+      configuredHost: getWorkerHost(),
+      localApiTokenSet: this.localApiTokenEnabled,
+      remoteTokenHost: SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH, false, { readOnly: true })
+        .CLAUDE_MEM_LOCAL_API_TOKEN_REMOTE_HOST,
+      workerUrl: buildWorkerUrl('/api/health'),
+    });
+
     // Phase 3 telemetry: bridge logged errors into PostHog Error Tracking
     // WITHOUT the logger importing telemetry (no import cycle). captureException
     // enforces consent + kill-switch + rate-limit internally and never throws.
@@ -1336,6 +1346,7 @@ export class WorkerService implements WorkerRef {
           return this.searchRoutes.renderContextVariant(keys);
         },
         expandProjectReadKeys: (projects) => contextReader.readKeys(projects),
+        listCatalogProjects: () => this.dbManager.getSessionStore().getProjectCatalog().projects,
         // Local-first: the local db is the source of truth, so the files are
         // servable with or without cloud sync. Sync applies other devices' ops in
         // the background, and every applied op invalidates the files (SyncApply).

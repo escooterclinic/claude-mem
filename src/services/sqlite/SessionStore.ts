@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'crypto';
 import { DATA_DIR, DB_PATH, ensurePrivateDir, OBSERVER_SESSIONS_PROJECT, USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import type { ProjectKeySource } from '../../utils/project-name.js';
+import type { ProjectExclusionCatalog } from '../../shared/project-list.js';
 import { projectReadKeys, projectScopeSql, scopedProjects } from './project-read-keys.js';
 import {
   TableColumnInfo,
@@ -3216,7 +3217,7 @@ export class SessionStore {
     return rows.map(row => row.project);
   }
 
-  getProjectCatalog(): {
+  getProjectCatalog(includeCheckoutPaths = false): Partial<ProjectExclusionCatalog> & {
     projects: string[];
     sources: string[];
     projectsBySource: Record<string, string[]>;
@@ -3225,17 +3226,19 @@ export class SessionStore {
       SELECT
         COALESCE(platform_source, '${DEFAULT_PLATFORM_SOURCE}') as platform_source,
         project,
+        ${includeCheckoutPaths ? 'cwd,' : ''}
         MAX(started_at_epoch) as latest_epoch
       FROM sdk_sessions
       WHERE project IS NOT NULL AND project != ''
         AND project != ?
-      GROUP BY COALESCE(platform_source, '${DEFAULT_PLATFORM_SOURCE}'), project
+      GROUP BY COALESCE(platform_source, '${DEFAULT_PLATFORM_SOURCE}'), project${includeCheckoutPaths ? ', cwd' : ''}
       ORDER BY latest_epoch DESC
-    `).all(OBSERVER_SESSIONS_PROJECT) as Array<{ platform_source: string; project: string; latest_epoch: number }>;
+    `).all(OBSERVER_SESSIONS_PROJECT) as Array<{ platform_source: string; project: string; cwd?: string | null }>;
 
     const projects: string[] = [];
     const seenProjects = new Set<string>();
     const projectsBySource = new Map<string, Set<string>>();
+    const checkoutPaths = new Map<string, Set<string>>();
 
     for (const row of rows) {
       const source = normalizePlatformSource(row.platform_source);
@@ -3243,6 +3246,12 @@ export class SessionStore {
       let sourceProjects = projectsBySource.get(source);
       if (!sourceProjects) projectsBySource.set(source, sourceProjects = new Set());
       sourceProjects.add(row.project);
+
+      if (row.cwd) {
+        let paths = checkoutPaths.get(row.project);
+        if (!paths) checkoutPaths.set(row.project, paths = new Set());
+        paths.add(row.cwd);
+      }
 
       if (!seenProjects.has(row.project)) {
         seenProjects.add(row.project);
@@ -3255,6 +3264,17 @@ export class SessionStore {
     return {
       projects,
       sources,
+      ...(includeCheckoutPaths && {
+        checkoutPathsByProject: Object.fromEntries([...checkoutPaths].map(([key, paths]) => [key, [...paths]])),
+        // A single adopted observation or summary is enough to read its source through the target.
+        projectMerges: this.db.query<ProjectExclusionCatalog['projectMerges'][number], []>(`
+          SELECT project AS source, merged_into_project AS target FROM observations
+          WHERE merged_into_project COLLATE NOCASE IS NOT NULL
+          UNION
+          SELECT project, merged_into_project FROM session_summaries
+          WHERE merged_into_project COLLATE NOCASE IS NOT NULL
+        `).all(),
+      }),
       projectsBySource: Object.fromEntries(
         sources.map(source => [source, [...(projectsBySource.get(source) ?? [])]])
       )
@@ -5209,14 +5229,26 @@ export class SessionStore {
     }).immediate();
   }
 
+  /**
+   * Finalize the cached hot-path statements while leaving a shared connection
+   * open. A manager that owns the database closes it itself and never calls
+   * `close()`, so it has to finalize these first: bun keeps the connection,
+   * its WAL index mapping and the database file alive until every statement is
+   * finalized or collected. On Windows the file or its directory cannot be
+   * renamed or removed before then.
+   */
+  finalizeCachedStatements(): void {
+    for (const statement of this.statementCache.values()) statement.finalize();
+    this.statementCache.clear();
+  }
+
   close(): void {
     // bun keeps a prepared statement — and with it the connection, its WAL index mapping and the
     // database file — alive until the statement is finalized or collected, so a plain `db.close()`
     // releases nothing while this store still holds its cache. Finalize the cached statements first,
     // the way initializeOwnedDatabase does; then close strict, which Windows needs before the file
     // or its directory can be renamed or removed.
-    for (const statement of this.statementCache.values()) statement.finalize();
-    this.statementCache.clear();
+    this.finalizeCachedStatements();
     try {
       this.db.close(true);
     } catch (error) {
