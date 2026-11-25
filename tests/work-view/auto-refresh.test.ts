@@ -505,6 +505,35 @@ describe('refresh task', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it('a story preference over its cap is refused once, trimmed on the retry with the others kept, and the result says so', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'auto-refresh-story-trim-'));
+    const database = fixtureDatabase();
+    try {
+      const long = 'Show honest empty states and never fabricate fallback data. '.repeat(4).slice(0, 201);
+      const story = JSON.stringify({ narrative: 'One request is under way.', preferences: [
+        { preference: 'Keep me.', kind: 'directive', supportCount: 2, quotes: [] },
+        { preference: long, kind: 'directive', supportCount: 1, quotes: [] },
+      ] });
+      const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 0, ungrouped: 1, goalsStale: false, unplaced: 0, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: focusWriter(database).save });
+      const storyPrompts: string[] = [];
+      const summary = await task.run(async (prompt: string) => {
+        if (prompt.includes('Do only section 1')) return JSON.stringify({ groups: [{ title: 'Release cards', conversations: [key('a')] }] });
+        if (prompt.includes('Do only section 2')) return reviewAll(prompt);
+        if (prompt.includes('Do only section 4')) return everyRequestInOther(prompt);
+        if (prompt.includes('Do only section 5')) { storyPrompts.push(prompt); return story; }
+        throw new Error(`Unexpected prompt: ${prompt.slice(-200)}`);
+      }, 'gemini');
+      // The same answer twice: the first is refused, the retry is trimmed and saved.
+      expect(storyPrompts).toHaveLength(2);
+      expect(storyPrompts[1]).toContain('preferences[1].preference is 201 characters');
+      expect(summary).toBe('1 new conversations grouped, 1 requests reviewed, 1 requests placed, story written (1 story preferences trimmed after retry).');
+      const saved = readLedger(dir).story.preferences.map((preference: any) => preference.preference);
+      expect(saved[0]).toBe('Keep me.');
+      expect(saved[1].length).toBeLessThanOrEqual(200);
+      expect(saved[1].endsWith('…')).toBe(true);
+    } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('a retry still missing reviewBasis fails the run naming the group and saves no review', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'auto-refresh-basis-'));
     try {
@@ -1925,16 +1954,16 @@ describe('My Work refresh stays on one agent (#5189)', () => {
   it('an API-endpoint provider runs the first logged-in agent, whichever it is, and only that one, until the owner sets CLAUDE_MEM_WORK_VIEW_AGENT=api', async () => {
     for (const provider of ['openrouter', 'openai-compatible', 'cmem']) {
       await withSettings({ CLAUDE_MEM_PROVIDER: provider }, dir => expect(resolveRefreshAgents(dir)).toEqual({ stayOnFirstUsableAgent: true }));
-      await withSettings({ CLAUDE_MEM_PROVIDER: provider, CLAUDE_MEM_WORK_VIEW_AGENT: 'api' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ allowedAgents: ['api'], preferredAgent: 'api', stayOnFirstUsableAgent: true }));
+      await withSettings({ CLAUDE_MEM_PROVIDER: provider, CLAUDE_MEM_WORK_VIEW_AGENT: 'api' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ allowedAgents: ['api'], preferredAgent: 'api', stayOnFirstUsableAgent: true, apiLimits: { timeoutMs: 600_000, maxOutputTokens: 16_000 } }));
     }
   });
 
   it('CLAUDE_MEM_WORK_VIEW_AGENT picks the agent, turns the runs off, or opts into falling through', async () => {
     await withSettings({ CLAUDE_MEM_PROVIDER: 'claude', CLAUDE_MEM_WORK_VIEW_AGENT: 'codex' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ allowedAgents: ['codex'], preferredAgent: 'codex', stayOnFirstUsableAgent: true }));
     await withSettings({ CLAUDE_MEM_PROVIDER: 'claude', CLAUDE_MEM_WORK_VIEW_AGENT: 'off' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ allowedAgents: [], stayOnFirstUsableAgent: true }));
-    await withSettings({ CLAUDE_MEM_PROVIDER: 'codex', CLAUDE_MEM_WORK_VIEW_AGENT: 'all' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ preferredAgent: 'codex', stayOnFirstUsableAgent: false }));
+    await withSettings({ CLAUDE_MEM_PROVIDER: 'codex', CLAUDE_MEM_WORK_VIEW_AGENT: 'all' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ preferredAgent: 'codex', stayOnFirstUsableAgent: false, apiLimits: { timeoutMs: 600_000, maxOutputTokens: 16_000 } }));
     // 'all' is the owner's explicit choice of every logged-in local agent, API install or not.
-    await withSettings({ CLAUDE_MEM_PROVIDER: 'openrouter', CLAUDE_MEM_WORK_VIEW_AGENT: 'all' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ preferredAgent: undefined, stayOnFirstUsableAgent: false }));
+    await withSettings({ CLAUDE_MEM_PROVIDER: 'openrouter', CLAUDE_MEM_WORK_VIEW_AGENT: 'all' }, dir => expect(resolveRefreshAgents(dir)).toEqual({ preferredAgent: undefined, stayOnFirstUsableAgent: false, apiLimits: { timeoutMs: 600_000, maxOutputTokens: 16_000 } }));
   });
 
   it('an unrecognized CLAUDE_MEM_WORK_VIEW_AGENT is logged and the provider decides', async () => {
