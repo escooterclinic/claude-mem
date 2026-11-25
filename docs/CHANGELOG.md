@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Eligible existing installs receive a dated holiday Cloud Sync offer from the new Messages from Claude-Mem queue on their next interactive startup. Each installation records the dispatch time locally. Agents can optionally acknowledge sharing the message with `claude-mem messages acknowledge <message-id>`.
+- The local memory timeline now offers eligible Claude-Mem users a 30-day Cloud Sync and remote Work Viewer trial with no credit card required. Dismissing the invitation hides it on that browser.
+- The remote Work Viewer now guides trial users through six workflows, including cross-agent handoffs, decision tracing, and optional weekday briefings and Friday reviews.
+- The Cloud Sync giveaway GIF at the top of the project README links to cmem.ai.
+
+## [16.1.4] - 2026-11-25
+
+- Setup offers a 30-day Cloud Sync trial without a credit card. People installing directly or with an agent can choose a private, signed-in My Work view. Explicit local and custom sync settings are preserved.
+- The cloud viewer uses the current account to load synced work, evidence and review changes. Returning to a tab verifies the signed-in account before showing its contents. Retrying a save after a lost response reuses the same action ID.
+- During the trial, My Work offers optional guidance for trying cross-agent sync and shows when to add a payment method to continue.
+
+## [16.1.3] - 2026-11-24
+
+## Critical fix
+
+- **OpenRouter errors sent with HTTP 200 no longer discard queued observations** (#6448, thanks @ryrenz, closes #6447 reported by @claudemeister). OpenRouter can accept a request and then report a temporary failure ("high demand", "temporarily rate-limited upstream") in the body of a 200 response, as `{"error":{"code":<number>,...}}`. The observer classified these as unrecoverable, so it did not retry, pause or fall back: it finalized the session and discarded its queued observations. The reporter lost 8.5% to 16% of events in one day. The classifier now uses the numeric `error.code` when the HTTP status is 2xx, so code 429 is a rate limit and 5xx is transient. A litellm output failure ("Unable to get json") stays an output failure and is never resent, because the model already ran and was billed.
+
+## Fixes
+
+- **`claude-mem server jobs retry` no longer reports `requeued` for a job it did not publish** (#6439, thanks @HEOJUNFO). If Redis was unreachable, or the shell had no `CLAUDE_MEM_QUEUE_ENGINE=bullmq`, the command printed `"outcome": "requeued"` and exited 0, and the job never ran. It now moves the row back to `failed` with `retry_republish_failed`, prints the reason and exits 1, so the same command works once the queue is reachable.
+- **Server generation jobs wait out a provider's Retry-After** (#6440, thanks @HEOJUNFO). A rate-limited job was redelivered after 5s and 10s whatever wait the provider asked for, so all three attempts could land inside the window and the job failed with no observation. When the provider sends a wait, the job is now delayed for it (capped at 60s, the same cap the worker uses). Rate limits without a wait, timeouts and 5xx keep the 5s/10s backoff.
+- **`POST /v1/events` answers 400 instead of 500 for data Postgres can never store** (#6446, thanks @alessandropcostabr). A tool result with a NUL character (for example from reading a binary file) failed every time, and a 500 sent it to the local spool to be retried until the window expired. NUL is now removed from payload and metadata before private-tag stripping and redaction, and other data exceptions (SQLSTATE class 22) answer `400 InvalidData`.
+
+## My Work and API agents
+
+- **OpenAI-compatible observers and API agents can send an explicit reasoning effort** (#6434, thanks @ZedingZhang, closes #6433 reported by @maxmad64bis). Set `CLAUDE_MEM_OPENAI_COMPAT_REASONING_EFFORT` to `none`, `low`, `medium`, `high`, `xhigh` or `max` in the viewer, settings file or environment. Leaving it empty keeps each caller's current behavior. If an endpoint rejects the field, the client resends once without it and remembers that for the URL.
+- **My Work API refresh timeout and answer limit are configurable** (#6437, thanks @ZedingZhang, part of #6432 reported by @hello-sebastian). With `CLAUDE_MEM_WORK_VIEW_AGENT=api`, `CLAUDE_MEM_WORK_VIEW_API_TIMEOUT_MS` (default 600000, 10 minutes) sets the deadline for one refresh question, and `CLAUDE_MEM_WORK_VIEW_MAX_OUTPUT_TOKENS` (default 16000) caps one answer. A cut-off answer reports the cap it used.
+- **A story preference one character over the cap no longer discards the whole story** (#6435, thanks @GratefulDave). On the retry, a preference over 200 characters is now cut at a word boundary, like the review steps already do. The first answer is still checked strictly.
+
+## Translations
+
+- **Brazilian Portuguese now covers the viewer, settings and setup** (#6436, thanks @ZedingZhang, closes #6318 reported by @dev-a4). Selecting **Português (Brasil)** translates the classic viewer, settings and setup alongside My Work.
+
+## Internal
+
+- Owner-only file mode assertions are skipped on Windows, which has no POSIX permission bits (#6443, thanks @Lupin133).
+- The backup restore test suites pass on Windows (#6444, thanks @Lupin133).
+
+**Full changelog**: https://github.com/thedotmack/claude-mem/compare/v16.1.2...v16.1.3
+
 ## [16.1.2] - 2026-11-24
 
 ### Installer improvements
