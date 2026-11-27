@@ -25,7 +25,7 @@ import { SettingsDefaultsManager, type SettingsDefaults } from '../../shared/Set
 import { logger } from '../../utils/logger.js';
 import { FOCUS_BATCH, readGoals, readLedger, runCli, storyInput as buildStoryInput, TITLE_BATCH, validateFocusAnswer, validateGroupingAnswer, validateStory, trimStoryPreferences, validateTitleAnswer, type FocusInput, type FocusRequestRecord, type LedgerDatabase, type RefreshNeeds } from './request-groups.mjs';
 import { FOCUS_AUTO_PLACE_THRESHOLD, judgeFocusBatch, placesAlone, type FocusJudge, type FocusJudgement } from './focus-judge.mjs';
-import { isWithdrawnArea, ownerGoalsAreaRows, ownerGoalsSaveKey, PROPOSAL_KINDS, readFocusAreas, routerFocusRows, type FocusArea, type RouterFocusBody } from './my-focus.mjs';
+import { isWithdrawnArea, OTHER_FOCUS_AREA_ID, ownerGoalsAreaRows, ownerGoalsSaveKey, PROPOSAL_KINDS, readFocusAreas, routerFocusRows, type FocusArea, type RouterFocusBody } from './my-focus.mjs';
 import { NAV_LABELS } from './nav-words.mjs';
 import { routeUndecided, type RequestJudge } from './request-judge.mjs';
 import { RUNTIME_SKILLS } from '../../shared/runtime-skills.js';
@@ -207,7 +207,9 @@ export const TITLE_ANSWER_SCHEMA: AnswerSchema = strictObject({
 });
 
 /** The answer `record-focus` takes: every request placed by area id (or "other"), and areas proposed from Other.
- * sameAs is the model's judgment of which saved area (dismissed ones included) a proposal already is, or null. */
+ * sameAs is the model's judgment of which saved area (dismissed ones included) a proposal already is, or null.
+ * A request the model cannot decide goes in `ignored` with its reason and is recorded in Other
+ * (validateFocusAnswer) — the focus counterpart of grouping's `ignored`. */
 export const FOCUS_ANSWER_SCHEMA: AnswerSchema = strictObject({
   placements: { type: 'array', items: strictObject({ anchor: { type: 'string' }, focusAreaId: { type: 'string' }, evidence: { type: 'string' } }) },
   proposals: { type: 'array', items: strictObject({
@@ -217,6 +219,7 @@ export const FOCUS_ANSWER_SCHEMA: AnswerSchema = strictObject({
     sameAs: { type: ['string', 'null'] },
     evidence: { type: 'string' },
   }) },
+  ignored: { type: 'array', items: strictObject({ anchor: { type: 'string' }, reason: { type: 'string' } }) },
 });
 
 /** When each step ran, for refresh.json's run record (not shown in My Work). */
@@ -315,7 +318,12 @@ function goalsJson(saved: ReturnType<typeof readGoals>, story: { preferences?: A
 const NAV_LABEL_RULE = `A focus area's name never reuses a nav label as whole words, in any case: ${NAV_LABELS.map(label => `"${label}"`).join(', ')}. The worker refuses such a name and the whole answer fails.`;
 const focusAreasNote = (path: string) => `The focus areas already saved in My Focus are in ${path} (id, name, goal, status; do not run --print-focus-areas). For each focus area you write, set "matches" to the id of the saved area it already is, whatever its name, or null when none is. Never match by name alone. ${NAV_LABEL_RULE}`;
 
-export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { steps: StepTiming[] } {
+export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & {
+  steps: StepTiming[];
+  /** How many due groups the last run left without a review: the model gave none for them, on the first ask and on
+   * the retry. They stay due. 0 before a run and after one that reviewed every due group. */
+  readonly groupsLeftWithoutReview: number;
+} {
   const { needs, reason, dataDir, ledgerDir, pluginRoot, openDatabase } = options;
   if (typeof options.localDeviceId !== 'function') throw new TypeError('buildRefreshTask needs localDeviceId, the worker\'s sync device id.');
   const now = options.now ?? Date.now;
@@ -372,7 +380,11 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
   };
 
   const steps: StepTiming[] = [];
+  // Groups the run in progress (or the last one) left without a review: counted in the result line and read by the
+  // scheduler after the run (WorkViewRoutes defaultAutoRefresh). Each run starts from zero, a fallback agent's too.
+  let groupsLeftWithoutReview = 0;
   const run = async (askBackend: AskAgent, agent: TaskAgentId): Promise<string> => {
+    groupsLeftWithoutReview = 0;
     const runDir = join(ledgerDir, 'agent-runs', randomBytes(6).toString('hex'));
     mkdirSync(runDir, { recursive: true });
     let fileNumber = 0;
@@ -434,21 +446,40 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       } finally { database.close(); }
       return output as { placed: number; proposed: number };
     };
-    let droppedProposals = 0;
-    /** For the focus step's retry: the answer without each proposal that record-focus's check or the worker's write
-     * refuses. A proposal is a suggestion the owner still decides, so a bad one no longer fails the placements beside it.
-     * Refused placements are left for record-focus to refuse. */
-    const withoutRefusedProposals = (answer: any, input: Parameters<typeof validateFocusAnswer>[1], flags: { other?: boolean } = {}) => {
+    let droppedProposals = 0, placedInOtherAfterRetry = 0;
+    /** A check of a focus answer that writes nothing: record-focus's check, then the worker's pure preflight
+     * (WorkViewRoutes.recordRouterFocus), as the goals step reuses ownerGoalsAreaRows: a name reusing a nav label, or a
+     * row too long to save, fails only there. */
+    const focusAnswerCheck = (input: Parameters<typeof validateFocusAnswer>[1], flags: { other?: boolean } = {}) => {
       const ledger = readLedger(ledgerDir);
       const database = openDatabase();
       let focusAreas: FocusArea[];
       try { focusAreas = readFocusAreas(database, { localDeviceId }); } finally { database.close(); }
-      // The worker's pure preflight (WorkViewRoutes.recordRouterFocus) after record-focus's check, as the goals step reuses
-      // ownerGoalsAreaRows: a name reusing a nav label, or a row too long to save, fails only there. Nothing is written.
-      const accepted = (candidate: any) => {
+      return (candidate: any) => {
         try { routerFocusRows(validateFocusAnswer(candidate, input, ledger, flags), focusAreas); return true; }
         catch (error) { if (error instanceof TypeError || error instanceof RangeError) return false; throw error; }
       };
+    };
+    /** For the placing retry: a model that leaves the same requests out every time would fail every refresh forever
+     * (#6432). When leaving them out is the answer's only fault, those requests go in Other, where the owner sees them
+     * and can move them, and the rest of the answer is saved. Any other refusal still fails the step. */
+    const withMissingPlacedInOther = (answer: any, input: FocusInput) => {
+      if (!Array.isArray(answer?.placements)) return answer;
+      const named = new Set([...answer.placements, ...(Array.isArray(answer.ignored) ? answer.ignored : [])].map((entry: any) => entry?.anchor));
+      const missing = input.requests.map(request => request.anchor).filter(anchor => !named.has(anchor));
+      if (!missing.length) return answer;
+      const candidate = { ...answer, placements: [...answer.placements, ...missing.map(anchor => ({
+        anchor, focusAreaId: OTHER_FOCUS_AREA_ID, evidence: 'Not placed by the model; move it if it belongs elsewhere.',
+      }))] };
+      if (!focusAnswerCheck(input)({ ...candidate, proposals: [] })) return answer;
+      placedInOtherAfterRetry += missing.length;
+      return candidate;
+    };
+    /** For the focus step's retry: the answer without each proposal that record-focus's check or the worker's write
+     * refuses. A proposal is a suggestion the owner still decides, so a bad one no longer fails the placements beside it.
+     * Refused placements are left for record-focus to refuse. */
+    const withoutRefusedProposals = (answer: any, input: Parameters<typeof validateFocusAnswer>[1], flags: { other?: boolean } = {}) => {
+      const accepted = focusAnswerCheck(input, flags);
       if (!Array.isArray(answer?.proposals) || !accepted({ ...answer, proposals: [] })) return answer;
       const proposals = answer.proposals.reduce((kept: unknown[], proposal: unknown) => accepted({ ...answer, proposals: [...kept, proposal] }) ? [...kept, proposal] : kept, []);
       droppedProposals += answer.proposals.length - proposals.length;
@@ -503,14 +534,39 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       const rule = languageRule();
       return timed(name, () => askAndSave(name, rule ? `${question}\n\n${rule}` : question, save, answerSchema));
     };
+    /** A failed answer kept for diagnosis, named by step and agent. Returns its path. Review batches run
+     * concurrently, so a name already taken in the same millisecond gets a numeric suffix instead of
+     * overwriting the earlier batch's answer. */
+    const keepFailedAnswer = (name: Step, text: string): string => {
+      const failedDir = join(ledgerDir, 'failed-answers');
+      mkdirSync(failedDir, { recursive: true });
+      const base = join(failedDir, `${new Date(now()).toISOString().replaceAll(':', '-')}-${name}-${agent}`);
+      let answerPath = `${base}.txt`;
+      for (let suffix = 2; existsSync(answerPath); suffix++) answerPath = `${base}-${suffix}.txt`;
+      writeFileSync(answerPath, text, { mode: 0o600 });
+      return answerPath;
+    };
     /** Ask, save, and on a refusal (unreadable JSON or a validator's) ask once more with the answer and reason.
      * A step refused twice fails with its last raw answer kept in failed-answers/ for diagnosis. `retry` tells the save
-     * it holds that second answer. */
+     * it holds that second answer. An answer cut off at the provider's token limit fails at once, its raw text
+     * kept the same way: re-asking cannot fix output that degenerated (#6432). */
     const askAndSave = async <T>(name: Step, question: string, save: (answer: any, retry: boolean) => T | Promise<T>, answerSchema?: AnswerSchema): Promise<T> => {
       let refusal: string | null = null;
       let answer = '';
       for (let attempt = 0; attempt < 2; attempt++) {
-        answer = await ask(refusal ? `${question}\n\nYour previous answer was refused: ${refusal}\nRejected answer:\n${answer}\n\nFix it and answer again.` : question, stepModels[name], answerSchema);
+        try {
+          answer = await ask(refusal ? `${question}\n\nYour previous answer was refused: ${refusal}\nRejected answer:\n${answer}\n\nFix it and answer again.` : question, stepModels[name], answerSchema);
+        } catch (error) {
+          // An answer the provider cut off arrives as an error carrying the raw text (the API agent's
+          // readAnswer): keep it like a refused answer and fail with its path, instead of losing the one
+          // piece of evidence that shows what the model did. Errors carrying no answer (a provider
+          // refusal, a timeout) keep their own shape.
+          const rawAnswer = (error as { rawAnswer?: unknown })?.rawAnswer;
+          if (typeof rawAnswer !== 'string' || !rawAnswer) throw error;
+          const answerPath = keepFailedAnswer(name, rawAnswer);
+          // The path goes first: the runner keeps only the first 500 characters of an error.
+          throw refused(new Error(`${name} (raw answer: ${answerPath}): ${error instanceof Error ? error.message : String(error)}`));
+        }
         try { return await save(parseAgentJson(answer), attempt > 0); }
         catch (error) {
           // A save that failed after it started writing is not the answer's fault, and asking again would write twice.
@@ -518,10 +574,7 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
           refusal = error instanceof Error ? error.message : String(error);
         }
       }
-      const failedDir = join(ledgerDir, 'failed-answers');
-      mkdirSync(failedDir, { recursive: true });
-      const answerPath = join(failedDir, `${new Date(now()).toISOString().replaceAll(':', '-')}-${name}-${agent}.txt`);
-      writeFileSync(answerPath, answer, { mode: 0o600 });
+      const answerPath = keepFailedAnswer(name, answer);
       // The path goes first: the runner keeps only the first 500 characters of an error.
       throw refused(new Error(`${name} (raw answer: ${answerPath}): ${refusal}`));
     };
@@ -764,19 +817,38 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       const due: Array<{ groupId: string }> = cli(['pending', '--days', '14', '--limit', '1000000']).groups;
       let reviewed = 0;
       const coercedReviewFields = new Set<string>(), droppedPreferences = new Set<string>();
-      /** One batch of reviews. Like step(), but a refusal re-asks only for the groups that were refused. */
+      /** One batch of reviews. Like step(), but a refusal re-asks only for the groups that were refused.
+       * A group the model gave no review for, on the first ask and on that one retry, is left without a review: it
+       * stays due and the next refresh asks for it again. A model that leaves the same group out every time used to
+       * fail every refresh here, so titles, focus and the story never ran (#6432). The batch's saved reviews stand
+       * and the refresh goes on. A review that was given and could not be saved (the check refused it, or the write
+       * failed) still fails the batch unless its retry is saved: leaving that group out on the retry does not
+       * forgive it, so a write that keeps failing is never reported as a group the model left out. */
       const reviewBatch = async (groups: Array<{ groupId: string }>, rule: string) => {
         let shows = groups.map(group => cli(['show', group.groupId]));
         let refusals: string[] = [];
         let rejectedReviews: Array<{ groupId?: string }> = [];
+        /** Why a review that was given could not be saved, by group, from either ask. */
+        const rejections = new Map<string, string>();
         for (let attempt = 0; attempt < 2 && shows.length; attempt++) {
           const retryGroupIds = new Set(shows.map(show => show.groupId));
-          const text = await ask([
-            requestProgress, '---', readOnly,
-            `Do only section 2's review for the groups whose \`show\` output is in ${writeInput('show', shows)}: decide each one from the evidence as the reviewer task describes (amend the previous review for a group in "amend" mode). Reply with only {"reviews": [<one record-progress input per group, with reviewBasis copied verbatim from its show output>]}.`,
-            rule,
-            refusals.length ? `Your previous answer was refused for these groups:\n${refusals.join('\n')}\nFix them and answer again for those groups only. Here are the rejected reviews to correct, preserving their evidence and reviewBasis:\n${JSON.stringify(rejectedReviews)}` : '',
-          ].filter(Boolean).join('\n\n'), stepModels.review);
+          let text: string;
+          try {
+            text = await ask([
+              requestProgress, '---', readOnly,
+              `Do only section 2's review for the groups whose \`show\` output is in ${writeInput('show', shows)}: decide each one from the evidence as the reviewer task describes (amend the previous review for a group in "amend" mode). Reply with only {"reviews": [<one record-progress input per group, with reviewBasis copied verbatim from its show output>]}.`,
+              rule,
+              refusals.length ? `Your previous answer was refused for these groups:\n${refusals.join('\n')}\nFix them and answer again for those groups only. Here are the rejected reviews to correct, preserving their evidence and reviewBasis:\n${JSON.stringify(rejectedReviews)}` : '',
+            ].filter(Boolean).join('\n\n'), stepModels.review);
+          } catch (error) {
+            // A review answer the provider cut off arrives as an error carrying the raw text, the same
+            // shape askAndSave handles: keep it and fail with its path first, instead of losing the one
+            // piece of evidence that shows what the model did.
+            const rawAnswer = (error as { rawAnswer?: unknown })?.rawAnswer;
+            if (typeof rawAnswer !== 'string' || !rawAnswer) throw error;
+            const answerPath = keepFailedAnswer('review', rawAnswer);
+            throw refused(new Error(`review (raw answer: ${answerPath}): ${error instanceof Error ? error.message : String(error)}`));
+          }
           let reviews: Array<{ groupId?: string }> = [];
           try { const answer = parseAgentJson(text); reviews = Array.isArray(answer.reviews) ? answer.reviews : []; }
           catch { /* Every group in this batch is refused below as "no review was given". */ }
@@ -792,12 +864,23 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
               for (const label of saved?.droppedPreferences ?? []) droppedPreferences.add(`${review.groupId}:${label}`);
               recorded.add(String(review.groupId)); reviewed++;
             }
-            catch (error) { rejectedReviews.push(review); refusals.push(`${review.groupId}: ${error instanceof Error ? error.message : String(error)}`); }
+            catch (error) {
+              const why = error instanceof Error ? error.message : String(error);
+              rejectedReviews.push(review); refusals.push(`${review.groupId}: ${why}`); rejections.set(String(review.groupId), why);
+            }
           }
           shows = shows.filter(show => !recorded.has(show.groupId));
-          for (const show of shows) if (!refusals.some(line => line.startsWith(`${show.groupId}:`))) refusals.push(`${show.groupId}: no review was given.`);
+          for (const show of shows) if (!refusals.some(line => line.startsWith(`${show.groupId}:`))) {
+            // Left out on the retry after a review that could not be saved: the failure keeps that first reason.
+            const earlier = rejections.get(show.groupId);
+            refusals.push(earlier ? `${show.groupId}: no review was given on the retry; the first one was not saved: ${earlier}` : `${show.groupId}: no review was given.`);
+          }
         }
-        if (shows.length) throw refused(new Error(`reviews: ${refusals.join('; ').slice(0, 500)}`));
+        if (!shows.length) return;
+        if (rejectedReviews.length || shows.some(show => rejections.has(show.groupId))) throw refused(new Error(`reviews: ${refusals.join('; ').slice(0, 500)}`));
+        groupsLeftWithoutReview += shows.length;
+        // The failed run used to name these groups in the worker log; the run that now finishes still does.
+        logger.warn('WORKER', `Work view refresh (${reason}) left ${shows.length} groups without a review; they stay due for the next refresh`, { agent, reviews: refusals.join('; ') });
       };
       // Batches are independent, so a few run at once; every batch finishes (and saves) before a failure is reported.
       // Not all at once: each batch is its own agent process, and a large backlog (Oct 25: ~1,100 due groups,
@@ -815,9 +898,10 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
       await Promise.all(Array.from({ length: Math.min(reviewConcurrency(dataDir), batches.length) }, lane));
       const failed = outcomes.filter(outcome => outcome.status === 'rejected');
       if (failed.length) throw (failed[0] as PromiseRejectedResult).reason;
-      const reviewRepairs = [...(coercedReviewFields.size ? [`${coercedReviewFields.size} oversized fields trimmed after retry`] : []),
-        ...(droppedPreferences.size ? [`${droppedPreferences.size} preferences without a quote or text dropped after retry`] : [])];
-      if (reviewed) done.push(`${reviewed} requests reviewed${reviewRepairs.length ? ` (${reviewRepairs.join(', ')})` : ''}`);
+      const reviewNotes = [...(coercedReviewFields.size ? [`${coercedReviewFields.size} oversized fields trimmed after retry`] : []),
+        ...(droppedPreferences.size ? [`${droppedPreferences.size} preferences without a quote or text dropped after retry`] : []),
+        ...(groupsLeftWithoutReview ? [`${groupsLeftWithoutReview} left without a review until the next refresh`] : [])];
+      if (reviewed || groupsLeftWithoutReview) done.push(`${reviewed} requests reviewed${reviewNotes.length ? ` (${reviewNotes.join(', ')})` : ''}`);
 
       // Names: a request the judge started (or whose title a grouping answer copied) still shows its opening ask word for
       // word as its title. After the reviews, so a vague ask ("figure it out") is named from what its review found; before
@@ -893,8 +977,8 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
           previousBatch = anchors.join('\n');
           const saved = await step('focus', sorting([
             `Do only section 4, steps 1–2 (place each request in a focus area, promoting one that holds several separate asks) for this batch, the \`focus-input\` output (also saved in ${writeInput('focus-input', input)}):\n\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``,
-            `Place each of these ${anchors.length} requests exactly once, by its "anchor": ${anchors.join(', ')}. Reply with only the JSON that \`record-focus\` takes ({"placements": [...], "proposals": [...]}).`,
-          ].join('\n\n')), (answer, retry) => recordFocus(['--limit', String(FOCUS_BATCH)], retry ? withoutRefusedProposals(answer, input) : answer), FOCUS_ANSWER_SCHEMA);
+            `Place each of these ${anchors.length} requests exactly once, by its "anchor": ${anchors.join(', ')}. Reply with only the JSON that \`record-focus\` takes ({"placements": [...], "proposals": [...], "ignored": [...]}). A request you cannot decide goes in "ignored" with a one-line "reason" instead of a placement; it is recorded in Other with that reason, for the owner to move.`,
+          ].join('\n\n')), (answer, retry) => recordFocus(['--limit', String(FOCUS_BATCH)], retry ? withoutRefusedProposals(withMissingPlacedInOther(answer, input), input) : answer), FOCUS_ANSWER_SCHEMA);
           placed += saved.placed; proposed += saved.proposed;
         }
         if (judged.size) {
@@ -910,6 +994,7 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
           proposed += saved.proposed;
         }
         if (placed || proposed || droppedProposals) done.push([...(placed ? [`${placed} requests placed`] : []), ...(proposed ? [`${proposed} focus areas suggested`] : []),
+          ...(placedInOtherAfterRetry ? [`${placedInOtherAfterRetry} requests placed in Other after retry`] : []),
           ...(droppedProposals ? [`${droppedProposals} refused focus area proposals dropped after retry`] : [])].join(', '));
       } catch (error) { focusError = error; }
 
@@ -1007,6 +1092,7 @@ export function buildRefreshTask(options: RefreshTaskOptions): AgentTask & { ste
   return {
     reason,
     steps,
+    get groupsLeftWithoutReview() { return groupsLeftWithoutReview; },
     // The refresh runs on the agent the owner's settings name, and stays there (#5189, #5435).
     ...resolveRefreshAgents(dataDir, reason === 'setup-scan'),
     // The work-view folder holds every input file; the data dir above it holds .env and settings.json.

@@ -963,6 +963,8 @@ var init_SettingsDefaultsManager = __esm({
         CLAUDE_MEM_SKIP_TOOLS: "ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion",
         CLAUDE_MEM_SKIP_BASH_PATTERNS: "",
         // Regex matched against a shell command (Bash; PowerShell; Codex exec_command); when it matches, the observation is skipped. Empty = capture every command. Use alternation for several patterns, e.g. ^(ls|cat|pwd)\b
+        CLAUDE_MEM_SKIP_BASH_PATTERNS_MATCH_EVERY_SEGMENT: "false",
+        // Opt in to matching every segment of a simple compound shell command. It only ever skips fewer commands: any `$`, backslash or other syntax it will not guess about keeps the command.
         CLAUDE_MEM_SKIP_SUBAGENT_OBSERVATIONS: "false",
         // #2736 — default off preserves current behavior; set 'true' to skip every subagent observation (recommended for heavy Dynamic Workflows users)
         CLAUDE_MEM_SKIP_AGENT_TYPES: "",
@@ -1031,7 +1033,7 @@ var init_SettingsDefaultsManager = __esm({
         CLAUDE_MEM_OPENROUTER_REASONING_EFFORT: "",
         // none | minimal | low | medium | high. Empty disables reasoning on openrouter.ai and the cmem gateway. A set effort is openrouter.ai only.
         CLAUDE_MEM_OPENAI_COMPAT_PRESET: "",
-        // Named endpoint preset for the openai-compatible provider (nvidia-nim, deepseek, groq, together, vllm, ollama, lmstudio). Empty = 'custom', configure the base URL by hand.
+        // Named endpoint preset for the openai-compatible provider (nvidia-nim, deepseek, groq, together, vllm, ollama, lmstudio, rapidmlx). Empty = 'custom', configure the base URL by hand.
         CLAUDE_MEM_OPENAI_COMPAT_API_KEY: "",
         // Key for the openai-compatible provider. Never shares the OpenRouter key or its attribution headers.
         CLAUDE_MEM_OPENAI_COMPAT_API_KEYS: "",
@@ -1040,6 +1042,10 @@ var init_SettingsDefaultsManager = __esm({
         // OpenAI-compatible base URL, e.g. https://integrate.api.nvidia.com/v1. Overrides the preset's base URL when set.
         CLAUDE_MEM_OPENAI_COMPAT_MODEL: "",
         // Model id passed verbatim. Empty = the preset's default model.
+        CLAUDE_MEM_OPENAI_COMPAT_MODEL_FROM_SESSION: "false",
+        // opt-in: use the model selected in the host session
+        CLAUDE_MEM_OPENAI_COMPAT_MODEL_FROM_HOST: "false",
+        // opt-in: read host configured model
         CLAUDE_MEM_OPENAI_COMPAT_REASONING_EFFORT: "",
         CLAUDE_MEM_OPENAI_COMPAT_REASONING: "",
         // off | on. Empty = off: every openai-compatible request sends reasoning:{enabled:false}. "on" leaves reasoning to the endpoint.
@@ -1234,6 +1240,8 @@ var init_SettingsDefaultsManager = __esm({
         // Per-attempt deadline for non-streamed observer requests (retry.ts); streamed OpenRouter/OpenAI-compatible requests use a 90s idle timeout + 300s cap (streamed-chat-completion.ts)
         CLAUDE_MEM_FIELD_OPTIMIZE_TIMEOUT_MS: String(DEFAULT_LLM_TIMEOUT_MS),
         // Oversized-field condensation deadline (field-optimizer.ts); a request to the same backend, so the same deadline
+        CLAUDE_MEM_FIELD_CONDENSE_ENABLED: "true",
+        // 'false' skips the oversized-field condense model call; the field is cut by head/tail elision instead (#6503)
         CLAUDE_MEM_LLM_STREAM_IDLE_TIMEOUT_MS: "90000",
         // Streamed request idle window (streamed-chat-completion.ts): silence that ends a stream. Self-hosted backends queue behind a load balancer, and the queue wait reads as idle (#4737) — raise it there. Literal because shared cannot import from the worker; a drift test pins it to the shipped constant
         CLAUDE_MEM_WORKER_HEARTBEAT_STALE_MS: "120000",
@@ -4657,6 +4665,20 @@ function buildAgentView(state, records, { now = Date.now(), workLimit = 240, act
     if (group.launch?.returnedAtEpoch) evidence2.push({ evidence: "agent-call-returned", atEpoch: group.launch.returnedAtEpoch, sourceRef: group.launch.shared ? null : { kind: "tool-use", id: group.launch.toolUseId } });
     return evidence2.filter((entry) => entry.atEpoch >= lastActive).sort((a, b) => b.atEpoch - a.atEpoch)[0] ?? null;
   }
+  const promptsBySessionId = /* @__PURE__ */ new Map();
+  for (const prompt of prompts) {
+    if (!promptsBySessionId.has(prompt.session_db_id)) promptsBySessionId.set(prompt.session_db_id, []);
+    promptsBySessionId.get(prompt.session_db_id).push(prompt);
+  }
+  const groupedSessionIds = new Set([...groups.values()].filter((group) => !group.isSubagent).map((group) => group.sessionId));
+  for (const session of sessions) {
+    if (session.id == null || groupedSessionIds.has(session.id)) continue;
+    if (ledger?.groups?.ignored?.[conversationKey(session)]) continue;
+    const own2 = promptsBySessionId.get(session.id) ?? [];
+    if (!originalFor(session, own2)) continue;
+    const group = getGroup({ session, agentId: null, agentType: null, project: session.project });
+    group.lastActivityEpoch = Math.max(group.lastActivityEpoch, session.started_at_epoch ?? 0, ...own2.map((prompt) => prompt.created_at_epoch ?? 0));
+  }
   const agents = [...groups.values()].map((group) => {
     const { lastActivityEpoch, ...publicGroup } = group;
     const age = Math.max(0, now - lastActivityEpoch);
@@ -5726,8 +5748,11 @@ function canonical(value) {
 }
 var priorFingerprintFields = ["id", "original", "explicitRequestText", "scopeUpdates", "title", "projects", "agentIds", "items", "lifecycle", "afterShip", "shipEstimate", "stageSourceText", "sourceContentHashes"];
 var fingerprintFields = [...priorFingerprintFields, "sourceProductHash"];
+function reviewedAgentIds(request) {
+  return Array.isArray(request.items) && request.items.length > 0 ? request.agentIds : [];
+}
 function fingerprintOf(request, fields) {
-  const content = Object.fromEntries(fields.map((key) => [key, request[key]]));
+  const content = Object.fromEntries(fields.map((key) => [key, key === "agentIds" ? reviewedAgentIds(request) : request[key]]));
   return createHash8("sha256").update(JSON.stringify(canonical(content))).digest("hex");
 }
 function contentFingerprint(request) {
@@ -26657,7 +26682,7 @@ function sharedReviewDescriptor(database, request, { deviceId, sharedState: shar
   for (const ref of request.sourceContentHashes ?? []) refFor(ref);
   const selected = {};
   for (const key of ["original", "explicitRequestText", "scopeUpdates", "projects", "agentIds", "items", "lifecycle", "afterShip", "shipEstimate", "stageSourceText"]) {
-    selected[key] = key === "projects" && Array.isArray(request[key]) ? [...new Set(request[key].map(sharedProjectKey).filter(Boolean))].sort(compare) : normalize(request[key], key);
+    selected[key] = key === "projects" && Array.isArray(request[key]) ? [...new Set(request[key].map(sharedProjectKey).filter(Boolean))].sort(compare) : normalize(key === "agentIds" ? reviewedAgentIds(request) : request[key], key);
   }
   selected.workProduct = (request.workProduct ?? []).map(productMeaning).sort(compare);
   selected.items?.sort(compare);

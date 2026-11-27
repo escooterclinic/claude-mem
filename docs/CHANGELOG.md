@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## Setup fixes
+
+- **Setup no longer ends in dead ends** (#6501, @thedotmack). A few setup paths could never finish, or finished without syncing:
+  - When cmem.ai refused a new install for a clear reason (rate limit or daily limit), the next run kept failing without asking again. That refusal is now cleared, so the next run asks again. Anything less certain keeps today's behaviour, so no second identity is made.
+  - After you approved Cloud Sync, a worker that was already running without sync settings only printed a warning, so nothing synced until some later restart. Setup now waits for background work to finish (up to 5 minutes) and restarts the worker once. A worker run by your own process manager (`CLAUDE_MEM_WORKER_AUTOSTART=false` or `CLAUDE_MEM_WORKER_URL`) is left alone, and you are told to restart it there.
+  - Right after checkout, setup showed the $30/month hosted plan before you had a single synced memory. That step is gone. My Work shows it as a banner you can dismiss, only after this computer's first memory syncs, and never to people who kept Pro or already have a hosted observer.
+  - The "sign in later" link at the end of install started a pairing nothing ever checked, so it never worked. It is removed.
+  - If you chose "This computer", My Work shows a Cloud Sync offer you can dismiss after three days.
+
+## Fixes
+
+- **Search finds prompts that hold every word you typed** (#6513, thanks @shaojunying). Prompt search matched the whole query as one exact string, so "auth bug" missed "fix the bug in the auth module". It now matches prompts that hold every term, like observation and summary search already did.
+- **A reply that mentions a session limit no longer pauses capture** (#6511, thanks @shaojunying). An observer reply such as "The application session limit is configurable." was read as a quota notice, so the worker paused capture and dropped that session's buffered work. Only a real limit notice at the start of the reply counts now.
+- **`save_memory` accepts a folder path as the project** (#6462, thanks @maxmad64bis). An absolute path passed as `project` is turned into the project name. The import refusal for an excluded project now names both causes, the folder and `--project`, and how to get past each.
+- **Restore refuses a file that isn't a claude-mem database** (#6460, thanks @ZedingZhang). A snapshot with no version stamp skipped the table check, so an unrelated SQLite file could replace your database. It now has to hold the worker tables, and your current database is left as it was.
+- **The launcher recognizes more ways of writing `~/.local/bin`** (#6472, thanks @JayPokale). `${HOME}/.local/bin`, `~/.local/bin` and a trailing slash on `PATH` now count, so install no longer adds a duplicate line to your shell profile.
+- **Server: `CLAUDE_MEM_MONTHLY_TOKEN_CAP` works without `CLAUDE_MEM_USAGE_METERING=1`** (#6514, thanks @kevincommits). With only the cap set, token usage was never recorded, so the cap was never reached. Setting the cap now records token usage.
+- **OpenCode Go and OpenCode Zen presets use the new `/inference` addresses** (#6463, thanks @maxmad64bis).
+- **Updating no longer aborts while the old worker is still shutting down** (#6453, thanks @maxmad64bis). The installer waited a flat 10 seconds for the old worker to exit, less than the worker's own shutdown can take, so a manual update aborted on any worker that hit its drain deadline. It now waits out the worker's full shutdown (25.5 seconds, 35.5 seconds on Windows) after one stop request.
+- **Test runs on macOS no longer end in exit 134** (#6479, @thedotmack). After every test passed, a run that had loaded the embedding model crashed on exit with "A C++ exception occurred". The test setup now releases that runtime before the process exits.
+- **My Work refresh no longer fails when the model skips a group** (#6515, @thedotmack). A group still unreviewed after the retry failed the whole refresh, so titles, focus and the story never ran. Now the refresh carries on, says how many groups were left without a review, and asks for them again next time.
+
+## New
+
+- **Skip Bash commands segment by segment** (#6504, thanks @zhangkom). Set `CLAUDE_MEM_SKIP_BASH_PATTERNS_MATCH_EVERY_SEGMENT=true` to skip a compound command only when every part of it matches `CLAUDE_MEM_SKIP_BASH_PATTERNS`. It is off by default. See the configuration docs for the trade-off.
+- **ZCode support** (#6487, thanks @rochafialvin). `npx claude-mem install --ide zcode` adds ZCode hooks and MCP recall, and status reports a disabled or incomplete setup.
+- **Per-prompt memory in OpenCode** (#6454, thanks @maxmad64bis). With `CLAUDE_MEM_SEMANTIC_INJECT=true`, OpenCode gets the observations that best match each prompt.
+- **OpenCode can use the session's own model for the observer** (#6493, thanks @maxmad64bis). Set `CLAUDE_MEM_OPENAI_COMPAT_MODEL_FROM_SESSION=true` and the OpenAI-compatible observer uses the model picked in that OpenCode session. It is off by default.
+- **Turn off the oversized-field condense call** (#6516, thanks @harpreetkbadhan). Set `CLAUDE_MEM_FIELD_CONDENSE_ENABLED=false` to skip the model call that shortens an oversized tool field; the field then goes straight to head and tail trimming. It is on by default, so nothing changes unless you set it.
+- **Rapid-MLX, Straitly and TeamoRouter presets** for the OpenAI-compatible provider (#6502, thanks @raullenchai; #6498, thanks @HashimSyedUBC; #6451, thanks @2867297362mjb-sketch). The TeamoRouter docs state what its privacy policy says it records.
+- **Docs:** a verified Kiro MCP recall guide (#6473, thanks @rochafialvin), a note on how `CLAUDE_MEM_DEDUP_ENABLED` affects `CLAUDE_MEM_REINFORCE_ALPHA` (#6461, thanks @maxmad64bis), and a note that `CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS` also sizes the condense request (#6518, thanks @harpreetkbadhan).
+
+## Contributors
+
+Thank you to @shaojunying, @maxmad64bis, @ZedingZhang, @JayPokale, @kevincommits, @zhangkom, @rochafialvin, @raullenchai, @HashimSyedUBC, @harpreetkbadhan and @2867297362mjb-sketch for the work in this release.
+
+**Full changelog**: https://github.com/thedotmack/claude-mem/compare/v17.0.1...v17.0.2
+
+## [17.0.1] - 2026-11-26
+
+## Critical fixes
+
+- **The setup page shows your cmem.ai device code, and reopening after it expires gets a fresh one** (#6500, @thedotmack). After you pick Cloud Sync and start the free trial, cmem.ai asks for a device code. That code was only printed in the terminal, which most people never look at because setup runs in the browser. The checkout step now shows **Your device code** with a copy button, next to "Waiting for this device to connect…". If the code expired, **Reopen** sent you back to a dead link with the same expired code. It now starts a new pairing with a new code. The code is never put in a URL, log line or analytics event, and the page reads it from a route only this machine can reach.
+- **Windows: My Work reads no longer hang when a recent Bash command holds regex-shaped text** (#6471, thanks @zhangkom, closes #6470 reported by @ingermaa). Shell text such as `s.replace(/\r\n/g, ' ')` was taken for an absolute path. Resolving `/\r\n/g,` could produce a UNC network path, and project discovery stalled while Windows tried a network lookup. Text that starts with a slash and a backslash is now ignored on Windows. Drive paths and POSIX paths are read as before.
+- **Windows: OMP capture and Screenpipe saves reach the worker again** (#6481, thanks @AyhamJo7, refs #6477 reported by @Jumpstile). On Windows the OMP hook and the Screenpipe skill posted to port 37777 by default. The worker picks its default port from a hash of the data folder, so on a default Windows install nothing listened on 37777 and OMP sessions were not recorded, with no error shown. Both now work out the default port the same way the worker does. A port saved in `settings.json` is still used first, and macOS and Linux are unchanged. **OMP users on Windows: run `npx claude-mem install --ide omp` once after updating.** The OMP hook is a copied file, so an update alone does not replace it.
+
+## Fixes
+
+- **Claude provider: condensing an oversized field now follows `CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS`** (#6508, thanks @0xABCD01, closes #6503 reported by @JonT6). The setting sized the condense request on the HTTP providers, but the Claude call never passed it. The request asked for the full 12,800 characters, and the extra output was billed and then clipped. At the default setting the Claude condense request now asks for 8,192 characters, the same as the HTTP providers. The Agent SDK has no per-request output cap, so on this path the setting sizes the request and is not a hard limit.
+- **My Work keeps a cut-off answer for diagnosis, and Focus can skip a request it cannot place** (#6441, thanks @0xABCD01, part of #6432 reported by @hello-sebastian). When an API answer ran out of tokens, its text was discarded and the error read as "raise the limit". The partial answer is now saved under `failed-answers/`, the step fails with that file's path first, and the error says a run-out almost always means the model's output degenerated, which a higher limit does not fix. The focus step now accepts an `ignored` list with a reason. An ignored request goes to Other, where you can move it.
+- **The SessionStart timeline lists one turn's observations oldest first** (#6495, thanks @HEOJUNFO). Turns ran oldest to newest, but the observations inside one turn ran newest to oldest, so the last row was not the newest entry. The newest entry is now last, as the timeline's own instructions say.
+- **`claude-mem server jobs retry` no longer reports `requeued` while a worker still holds the job** (#6494, thanks @HEOJUNFO). Cancelling a processing job and retrying it before the provider call returned left the job `queued` for good, and it never ran. The command now sets the job back to `failed` with `retry_republish_failed`, prints the reason and exits 1. Run it again after the provider call has returned and the job is requeued and runs.
+- **Server: `CLAUDE_MEM_MONTHLY_REQUEST_CAP` works without `CLAUDE_MEM_USAGE_METERING=1`** (#6489, thanks @kevincommits). With only the cap set, no requests were counted, so the cap was never reached and no request was answered with 402. Setting the cap now also counts requests. `CLAUDE_MEM_MONTHLY_TOKEN_CAP` still needs metering on.
+- **Server: `GET /v1/jobs` answers 400 for a `since` that is not a date** (#6484, thanks @kevincommits). A value such as `last-week` or `2026-13-45` dropped the filter and returned jobs from every date. It now answers 400 `INVALID_DATE`. A day that is not on the calendar, such as `2026-02-30`, also gets a 400, and epoch milliseconds are now accepted.
+- **OpenClaw: uninstalling gives the memory slot back to the plugin that had it** (#6445, thanks @DeryFerd). Installing took `plugins.slots.memory` from another memory plugin with no record of it, and uninstalling deleted the slot. Install now remembers the previous owner and uninstall restores it. When there was no previous owner, the slot is deleted as before.
+- **Install: the marketplace manifest and `package.json` are written atomically** (#6475, thanks @DeryFerd). A crash, a killed process or a full disk in the middle of a write could leave a truncated file. These were the last two plain writes in the install flow.
+- **My Work names the event type when it drops an unreadable stream frame** (#6476, thanks @DeryFerd). A frame that was not JSON was dropped without a trace, so a feed could stop updating with nothing to say why. The browser console now gets a warning that names the event type.
+- **Messages on Mac: someone leaving a group now reaches the transcript** (#6509, thanks @chuenchen309). The Mac source skipped the leave rows in chat.db. They now read "(Ben left the group)", the same as from the Photon source. Group photo and background changes are still skipped.
+
+## Contributors
+
+Thank you to everyone whose work is in this release: @zhangkom, @AyhamJo7, @0xABCD01, @HEOJUNFO, @kevincommits, @DeryFerd and @chuenchen309 for the fixes, and @ingermaa, @Jumpstile, @JonT6 and @hello-sebastian for the reports.
+
+**Full changelog**: https://github.com/thedotmack/claude-mem/compare/v17.0.0...v17.0.1
+
+## [17.0.0] - 2026-11-26
+
 ### Review Stack in My Work
 
 - Open **Review Stack** in local My Work or in your signed-in Cloud Sync Work View to review files, images, links and other work your agents submit. Browse lets you flip through a stack. Switch to Work to mark a card Seen, save it for later or leave a follow-up.

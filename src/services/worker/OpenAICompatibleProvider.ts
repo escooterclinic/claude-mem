@@ -31,7 +31,7 @@ import {
 import { resolveContextWindowTokens, observationFieldMaxChars, resolveObserverMaxOutputTokens } from './context-window.js';
 import { recycleObserverConversation, loadSessionStartContext, openObserverGeneration, observesBarePrompts } from './session/recycle-conversation.js';
 import { optimizeObservationFields, buildFieldCompressionPrompt, type CompressedField } from './field-optimizer.js';
-import { resolveFieldOptimizeTimeoutMs } from './retry.js';
+import { resolveFieldCondenseEnabled, resolveFieldOptimizeTimeoutMs } from './retry.js';
 import { buildTelegramWrapupPrompt, type TelegramWrapupFormatterInput } from '../integrations/TelegramWrapupNotifier.js';
 import { freezeResponseMedia, type PreparedTurnMedia, type TurnImageRequest } from '../media/inference.js';
 import { isObserverCaptureEnabled } from '../../shared/observer-capture.js';
@@ -130,7 +130,7 @@ const EMPTY_HISTORY_FALLBACK = '(context unavailable)';
  * resolution, request shape, token estimation, usage/cost reporting) are
  * supplied by abstract members.
  */
-export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string; model: string; plainText?: boolean }> {
+export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string; model: string; plainText?: boolean; summaryModel?: string }> {
   protected dbManager: DatabaseManager;
   protected sessionManager: SessionManager;
 
@@ -153,6 +153,21 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
 
   /** Resolve API key, model, and any per-provider request parameters. */
   protected abstract getConfig(): TConfig;
+
+  /**
+   * Resolve the config for one live session. The default is the provider's
+   * global config; a provider may narrow it with per-session state (e.g. the
+   * endpoint-ready observer model id Task 4 parks on the session).
+   *
+   * The optional host context lets a provider resolve per-project model
+   * settings for observation and summary turns without changing init or
+   * availability resolution.
+   */
+  protected configForSession(session: ActiveSession, host?: { cwd?: string }): TConfig {
+    void session;
+    void host;
+    return this.getConfig();
+  }
 
   /** Throw a provider-specific "API key not configured" error. */
   protected abstract missingApiKeyError(): Error;
@@ -371,19 +386,21 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
 
   /**
    * Character budget for one observer generation: operator-overridable (#3800)
-   * and never more than half this generation's model window (#3625).
+   * and never more than half this generation's model window (#3625). A caller
+   * that will pay with a different model (summary tier) passes that model's
+   * window explicitly instead of the session's observation-model window.
    */
-  protected conversationMaxChars(session: ActiveSession): number {
+  protected conversationMaxChars(session: ActiveSession, windowTokens?: number): number {
     return windowAwareConversationMaxChars(
       resolveConversationMaxChars(
         SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_OBSERVER_MAX_CONVERSATION_CHARS
       ),
-      session.observerContextWindowTokens,
+      windowTokens ?? session.observerContextWindowTokens,
     );
   }
 
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
-    const config = this.getConfig();
+    const config = this.configForSession(session);
     const { apiKey, model } = config;
     session.lastModelId = model;
     this.prepareSessionExtras(session, config);
@@ -458,7 +475,7 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     }
 
     try {
-      await this.runMessageLoop(session, worker, config, mode);
+      await this.runMessageLoop(session, worker, mode);
     } catch (error: unknown) {
       if (await this.recycleOnContextOverflow(error, session, worker)) return;
       if (isClassified(error)) {
@@ -483,10 +500,14 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
   private async runMessageLoop(
     session: ActiveSession,
     worker: WorkerRef | undefined,
-    config: TConfig,
     mode: ModeConfig
   ): Promise<void> {
     let lastCwd: string | undefined;
+    // Budgets are resolved once at generation start, but a session can pick a
+    // different model between two queued turns. Track the model they were
+    // resolved for so a switch to a smaller window shrinks the field caps and
+    // the retire threshold before the next request is built.
+    let budgetModel: string | undefined = session.lastModelId;
 
     for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
       session.pendingAgentId = message.agentId ?? null;
@@ -496,11 +517,37 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
         lastCwd = message.cwd;
       }
       const originalTimestamp = session.earliestPendingTimestamp;
+      // Resolve the config for THIS turn, with the live working directory so
+      // host/project model resolution applies only to observation and summary
+      // turns. The init config and session.lastModelId stay pinned to
+      // startSession. Resolving per message also lets a model selected in the
+      // host session between two queued inputs reach the second request.
+      // Synchronous and side-effect free — the buffer, paid-send budget, dedup
+      // and generator lifecycle are untouched.
+      const observationConfig = this.configForSession(session, { cwd: lastCwd });
+      // Re-apply the per-session extras (Codex: abort signal + sessionDbId) to
+      // THIS turn's freshly resolved config. getConfig() returns a new object,
+      // so without this the observation/summary request loses cancellation and
+      // per-session fault accounting even though startSession prepared its own
+      // config. Idempotent for providers whose hook only sets endpointClass.
+      this.prepareSessionExtras(session, observationConfig);
+
+      if (observationConfig.model !== budgetModel) {
+        session.observerContextWindowTokens = await this.resolveContextWindow(observationConfig);
+        session.abortController.signal.throwIfAborted();
+        budgetModel = observationConfig.model;
+        // Wrap-ups, session status and error/cancellation records read
+        // lastModelId rather than the per-turn config. Keep them on the
+        // model that actually serves this turn so a switch is not billed
+        // (or logged) under the previous one. The host-resolved config is
+        // the one that serves the turn, so it drives all three values.
+        session.lastModelId = observationConfig.model || session.lastModelId;
+      }
 
       if (message.type === 'observation') {
-        if (!(await this.processObservationMessage(session, message, worker, config, originalTimestamp, lastCwd))) return;
+        if (!(await this.processObservationMessage(session, message, worker, observationConfig, originalTimestamp, lastCwd))) return;
       } else if (message.type === 'summarize') {
-        if (!(await this.processSummaryMessage(session, message, worker, config, mode, originalTimestamp, lastCwd))) return;
+        if (!(await this.processSummaryMessage(session, message, worker, observationConfig, mode, originalTimestamp, lastCwd))) return;
       }
     }
   }
@@ -588,6 +635,7 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
       resolveFieldOptimizeTimeoutMs,
       session.observerContextWindowTokens,
       () => this.fieldCompressionMaxOutputTokens(),
+      resolveFieldCondenseEnabled,
     );
     // A cancelled field pass falls back to its raw value. Its ended session
     // must not turn that fallback into another paid observation request.
@@ -682,6 +730,36 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
     if (!session.memorySessionId) {
       throw new Error('Cannot process summary: memorySessionId not yet captured. This session may need to be reinitialized.');
     }
+
+    // Resolve the paying model FIRST: tier routing (and the host's smallModel)
+    // can pick a summary window narrower than the observation one.
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    const summaryModel = resolveSummaryTierModel(config.model, settings, config.summaryModel);
+    const summaryConfig = summaryModel === config.model ? config : { ...config, model: summaryModel };
+    if (summaryConfig !== config) {
+      logger.debug('SESSION', 'Tier routing: summary model', {
+        sessionId: session.sessionDbId, model: summaryModel
+      });
+    }
+
+    // Same pre-send ceiling as observations, measured against the window of
+    // the model that will actually pay for this summary. A session that
+    // switches to a smaller model can already hold a history that fit the old
+    // window; the summary must not be paid for before the generation is
+    // retired and its work returns through the normal live handoff.
+    const summaryWindowTokens = await this.resolveContextWindow(summaryConfig);
+    session.abortController.signal.throwIfAborted();
+    if (shouldRecycleConversation(session.conversationHistory, this.conversationMaxChars(session, summaryWindowTokens), session.lastContextTokens)) {
+      await recycleObserverConversation(
+        session,
+        this.sessionManager,
+        worker,
+        'budget',
+        describeGenerationUsage(session.conversationHistory, session.lastContextTokens),
+      );
+      return true;
+    }
+
     const summaryPrompt = buildSummaryPrompt({
       id: session.sessionDbId,
       memory_session_id: session.memorySessionId,
@@ -698,14 +776,6 @@ export abstract class OpenAICompatibleProvider<TConfig extends { apiKey: string;
 
     session.lastPromptSentAt = Date.now();
     session.lastGeneratorSource = 'summarize';
-    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
-    const summaryModel = resolveSummaryTierModel(config.model, settings);
-    const summaryConfig = summaryModel === config.model ? config : { ...config, model: summaryModel };
-    if (summaryConfig !== config) {
-      logger.debug('SESSION', 'Tier routing: summary model', {
-        sessionId: session.sessionDbId, model: summaryModel
-      });
-    }
     const summaryResponse = await this.queryObserverTurn(session, summaryConfig, paidSendBudgetForClaimedBatch(session), 'summary');
 
     accumulateObserverUsage(session, summaryResponse);

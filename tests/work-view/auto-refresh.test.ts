@@ -369,6 +369,36 @@ describe('automatic refresh scheduler', () => {
       expect(worker.status().nextAt).toBe(new Date(now + 10 * MINUTE).toISOString());
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it('a run that left groups without a review waits like a failed one, so the same groups are not asked for again every ten minutes (#6432)', async () => {
+    const dir = scratchDir('auto-refresh-left-reviews-wait');
+    try {
+      const MINUTE = 60000;
+      let now = NOW, groupsLeftWithoutReview = 1, runs = 0;
+      const worker = new AutoRefreshWorker({ localDeviceId: () => '', dir, openDatabase: handle(fixtureDatabase()), now: () => now, runJob: async () => {
+        runs++;
+        return { state: 'ok', agent: 'claude-code', result: '2 requests reviewed (1 left without a review until the next refresh).', error: null, groupsLeftWithoutReview };
+      } });
+      // The run itself is not a failure: My Work shows it as up to date.
+      expect(await worker.check()).toBe('ok');
+      expect(worker.status()).toMatchObject({ state: 'ok', error: null, failures: 1, nextAt: new Date(now + 10 * MINUTE).toISOString() });
+      now += 10 * MINUTE;
+      expect(await worker.check()).toBe('ok');
+      expect(worker.status()).toMatchObject({ state: 'ok', failures: 2, nextAt: new Date(now + 20 * MINUTE).toISOString() });
+      // The group is still due, but the scheduled check does not start a third run ten minutes later.
+      now += 10 * MINUTE;
+      expect(await worker.check()).toBe('backing-off');
+      expect(runs).toBe(2);
+      now += 10 * MINUTE;
+      expect(await worker.check()).toBe('ok');
+      expect(worker.status()).toMatchObject({ state: 'ok', failures: 3, nextAt: new Date(now + 40 * MINUTE).toISOString() });
+      // An explicit run is not held back, and one that reviews every group goes back to the ten-minute check.
+      groupsLeftWithoutReview = 0;
+      expect(await worker.runNow({ reason: 'manual' })).toBe('ok');
+      expect(worker.status().failures).toBeUndefined();
+      expect(worker.status().nextAt).toBe(new Date(now + 10 * MINUTE).toISOString());
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe('refresh task', () => {
@@ -720,10 +750,16 @@ describe('focus step', () => {
       const objects: any[] = [];
       const walk = (node: any) => { if (node?.type === 'object') objects.push(node); for (const value of Object.values(node ?? {})) if (value && typeof value === 'object') walk(value); };
       walk(FOCUS_ANSWER_SCHEMA);
-      expect(objects.length).toBe(3);
+      expect(objects.length).toBe(4);
       for (const object of objects) { expect(object.additionalProperties).toBe(false); expect(object.required).toEqual(Object.keys(object.properties)); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  /** A placing answer refused on every try: each request in an area id the batch does not list. */
+  const inAnUnlistedArea = (prompt: string) => {
+    const placed = JSON.parse(everyRequestInOther(prompt));
+    return JSON.stringify({ ...placed, placements: placed.placements.map((placement: object) => ({ ...placement, focusAreaId: 'fa_not_listed' })) });
+  };
 
   it(`places in batches of ${FOCUS_BATCH}, each saved before the next; a refused batch fails the step but the story still runs`, async () => {
     const dir = scratchDir('auto-refresh-focus-batches');
@@ -740,15 +776,15 @@ describe('focus step', () => {
         if (prompt.includes('Do only section 4')) {
           const input = focusInputFrom(prompt);
           batches.push(input.requests.length);
-          // The second batch's answers keep leaving a request out.
-          if (batches.length > 1 && refuseSecond) return JSON.stringify({ placements: [], proposals: [] });
+          // The second batch's answers keep naming an area that is not listed.
+          if (batches.length > 1 && refuseSecond) return inAnUnlistedArea(prompt);
           return everyRequestInOther(prompt);
         }
         return JSON.stringify({ narrative: 'Under way.', preferences: [] });
       };
       const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: FOCUS_BATCH + 1, ungrouped: 0, goalsStale: false, unplaced: FOCUS_BATCH + 1, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: writer.save });
       const error = await task.run(ask, 'codex').then(() => null, failure => failure as Error);
-      expect(error?.message).toMatch(/^focus \(raw answer: .+\): Place every request asked about; missing/);
+      expect(error?.message).toMatch(/^focus \(raw answer: .+\): placements\[0\] names "fa_not_listed", which is not a listed focus area/);
       expect((error as { answerRefused?: boolean }).answerRefused).toBe(true);
       expect(batches).toEqual([FOCUS_BATCH, 1, 1]);
       // The first batch was saved; the story was written anyway.
@@ -772,8 +808,8 @@ describe('focus step', () => {
       const ask = async (prompt: string) => {
         if (prompt.includes('Do only section 2')) return reviewAll(prompt);
         if (isOtherPass(prompt)) return JSON.stringify({ placements: [], proposals: [] });
-        // Every focus answer leaves requests out, so focus is refused twice.
-        if (prompt.includes('Do only section 4')) return JSON.stringify({ placements: [], proposals: [] });
+        // Every focus answer names an area that is not listed, so focus is refused twice.
+        if (prompt.includes('Do only section 4')) return inAnUnlistedArea(prompt);
         // The story's agent call itself crashes, which on its own would let the runner try the next agent.
         throw new Error('Claude Code stopped: socket hang up');
       };
@@ -1119,6 +1155,194 @@ describe('review repair', () => {
   });
 });
 
+describe('a group left without a review (#6432)', () => {
+  /** Requests a, b and c, one conversation each, all due for a review; returns the refresh options. */
+  function threeDueRequests(dir: string, database: Database) {
+    for (const [index, session] of ['b', 'c'].entries()) {
+      database.prepare('INSERT INTO sdk_sessions VALUES (?, ?, ?, ?, ?, ?, ?)').run(index + 2, 'claude', session, `m${index + 2}`, 'repo/tree', `Build feature ${session}`, NOW - 2 * DAY);
+      database.prepare('INSERT INTO user_prompts (session_db_id, prompt_number, prompt_text, created_at_epoch) VALUES (?, ?, ?, ?)').run(index + 2, 1, `Build feature ${session}`, NOW - 2 * DAY);
+    }
+    const decisions = join(dir, 'decisions.json');
+    writeFileSync(decisions, JSON.stringify({ groups: ['a', 'b', 'c'].map(session => ({ title: `Feature ${session}`, conversations: [key(session)] })) }));
+    runCli(['apply', decisions], { dir, database, now: NOW, print: () => {} });
+    return { localDeviceId: () => '', needs: { due: 3, ungrouped: 0, goalsStale: false, unplaced: 3, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: focusWriter(database).save };
+  }
+  const showsIn = (prompt: string) => JSON.parse(readFileSync(/is in (.+?\.json)/.exec(prompt)![1], 'utf8')) as Array<{ groupId: string; reviewBasis: unknown }>;
+  const reviewOf = (show: { groupId: string; reviewBasis: unknown }) => ({ groupId: show.groupId, state: 'in-progress', percent: 10, summary: 'Started.', reviewBasis: show.reviewBasis });
+  const dueGroupIds = (dir: string, database: Database) => {
+    let pending: any;
+    runCli(['pending'], { dir, database, now: NOW, print: (value: unknown) => { pending = value; } });
+    return pending.groups.map((group: { groupId: string }) => group.groupId);
+  };
+
+  it('a model that never reviews one group of a batch completes the refresh: the other reviews are saved, the count is reported, and the next refresh asks for that group again', async () => {
+    const dir = scratchDir('auto-refresh-review-left-out');
+    const database = fixtureDatabase();
+    const warnings: unknown[][] = [];
+    const warn = spyOn(logger, 'warn').mockImplementation((...args: unknown[]) => { warnings.push(args); });
+    try {
+      const options = threeDueRequests(dir, database);
+      const [reviewedA, leftOut, reviewedC] = ['a', 'b', 'c'].map(session => groupIdFor(key(session)));
+      const reviewAsks: string[][] = [], laterSteps: string[] = [];
+      let reviewsEveryGroup = false;
+      const ask = async (prompt: string) => {
+        if (!prompt.includes('Do only section 2')) { laterSteps.push(prompt); return defaultAnswer(prompt); }
+        const shows = showsIn(prompt);
+        reviewAsks.push(shows.map(show => show.groupId));
+        return JSON.stringify({ reviews: shows.filter(show => reviewsEveryGroup || show.groupId !== leftOut).map(reviewOf) });
+      };
+      const first = buildRefreshTask(options);
+      // Before the fix this run failed with "reviews: g_…: no review was given." and focus and the story never ran.
+      expect(await first.run(ask, 'claude-code')).toBe('2 requests reviewed (1 left without a review until the next refresh), 3 requests placed, story written.');
+      // One ask for the batch and the one retry for the group left out: no new ask.
+      expect(reviewAsks).toHaveLength(2);
+      expect([...reviewAsks[0]].sort()).toEqual([reviewedA, leftOut, reviewedC].sort());
+      expect(reviewAsks[1]).toEqual([leftOut]);
+      expect(Object.keys(readLedger(dir).progress).sort()).toEqual([reviewedA, reviewedC].sort());
+      expect(laterSteps.some(prompt => prompt.includes('Do only section 4, steps 1–2'))).toBe(true);
+      expect(readLedger(dir).story?.narrative).toBe('Started.');
+      expect(first.groupsLeftWithoutReview).toBe(1);
+      // The group and the reason stay in the worker log, where the failed run used to name them.
+      expect(warnings.filter(([, message]) => String(message).includes('without a review'))).toEqual([
+        ['WORKER', 'Work view refresh (scheduled) left 1 groups without a review; they stay due for the next refresh', { agent: 'claude-code', reviews: `${leftOut}: no review was given.` }],
+      ]);
+      expect(dueGroupIds(dir, database)).toEqual([leftOut]);
+
+      // The next refresh, a while later, asks for that group again, and only that group; its review then joins the story.
+      reviewsEveryGroup = true;
+      reviewAsks.length = 0;
+      const second = buildRefreshTask({ ...options, now: () => NOW + 10 * 60000 });
+      expect(await second.run(ask, 'claude-code')).toBe('1 requests reviewed, story updated.');
+      expect(reviewAsks).toEqual([[leftOut]]);
+      expect(readLedger(dir).progress[leftOut]).toMatchObject({ state: 'in-progress', percent: 10 });
+      expect(second.groupsLeftWithoutReview).toBe(0);
+      expect(dueGroupIds(dir, database)).toEqual([]);
+    } finally { warn.mockRestore(); database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ['holds no JSON', 'I could not review this request.'],
+    ['holds an empty reviews list', JSON.stringify({ reviews: [] })],
+  ])('a one-group batch whose answer %s on both tries is left for the next refresh, and the later steps still run', async (_shape, answer) => {
+    const dir = scratchDir('auto-refresh-review-left-whole-batch');
+    const database = fixtureDatabase();
+    const warn = spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const decisions = join(dir, 'decisions.json');
+      writeFileSync(decisions, JSON.stringify({ groups: [{ title: 'Feature a', conversations: [key('a')] }] }));
+      runCli(['apply', decisions], { dir, database, now: NOW, print: () => {} });
+      const task = buildRefreshTask({ localDeviceId: () => '', needs: { due: 1, ungrouped: 0, goalsStale: false, unplaced: 1, needed: true }, reason: 'scheduled', dataDir: dir, ledgerDir: dir, pluginRoot: PLUGIN_ROOT, openDatabase: handle(database), now: () => NOW, saveFocus: focusWriter(database).save });
+      let reviewAsks = 0;
+      const result = await task.run(async (prompt: string) => {
+        if (!prompt.includes('Do only section 2')) return defaultAnswer(prompt);
+        reviewAsks++;
+        return answer;
+      }, 'claude-code');
+      // No review moved, so no story is told; the request is still placed.
+      expect(result).toBe('0 requests reviewed (1 left without a review until the next refresh), 1 requests placed.');
+      expect(reviewAsks).toBe(2);
+      expect(task.groupsLeftWithoutReview).toBe(1);
+      expect(readLedger(dir).progress).toEqual({});
+      expect(dueGroupIds(dir, database)).toEqual([groupIdFor(key('a'))]);
+    } finally { warn.mockRestore(); database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('an agent that errors in the review step still fails the refresh there, and nothing after it runs', async () => {
+    const dir = scratchDir('auto-refresh-review-agent-error');
+    const database = fixtureDatabase();
+    try {
+      const task = buildRefreshTask(threeDueRequests(dir, database));
+      const laterSteps: string[] = [];
+      const error = await task.run(async (prompt: string) => {
+        if (prompt.includes('Do only section 2')) throw new Error('Claude Code stopped: the connection closed');
+        laterSteps.push(prompt);
+        return defaultAnswer(prompt);
+      }, 'claude-code').then(() => null, (caught: unknown) => caught as Error & { answerRefused?: boolean });
+      expect(error?.message).toBe('Claude Code stopped: the connection closed');
+      // Not an answer claude-mem refused: the runner may still hand the run to the next allowed agent.
+      expect(error?.answerRefused).toBeUndefined();
+      expect(laterSteps).toEqual([]);
+      expect(readLedger(dir).progress).toEqual({});
+    } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a review the check refuses on both tries still fails the refresh, even beside a group the model left out: only leaving a group out waits for the next refresh', async () => {
+    const dir = scratchDir('auto-refresh-review-refused-twice');
+    const database = fixtureDatabase();
+    try {
+      const task = buildRefreshTask(threeDueRequests(dir, database));
+      const [reviewedA, leftOut, refusedC] = ['a', 'b', 'c'].map(session => groupIdFor(key(session)));
+      const laterSteps: string[] = [];
+      let reviewAsks = 0;
+      const error = await task.run(async (prompt: string) => {
+        if (!prompt.includes('Do only section 2')) { laterSteps.push(prompt); return defaultAnswer(prompt); }
+        reviewAsks++;
+        return JSON.stringify({ reviews: showsIn(prompt).filter(show => show.groupId !== leftOut).map(show => show.groupId === refusedC ? { ...reviewOf(show), state: 'finished' } : reviewOf(show)) });
+      }, 'claude-code').then(() => null, (caught: unknown) => caught as Error & { answerRefused?: boolean });
+      expect(error?.message).toBe(`reviews: ${refusedC}: state must be one of shipped, in-progress, stalled, abandoned, unknown.; ${leftOut}: no review was given.`);
+      expect(error?.answerRefused).toBe(true);
+      expect(reviewAsks).toBe(2);
+      expect(laterSteps).toEqual([]);
+      // The review that was accepted on the first ask stays saved, as before.
+      expect(Object.keys(readLedger(dir).progress)).toEqual([reviewedA]);
+    } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a review that could not be written still fails the refresh, even beside a group the model left out', async () => {
+    const dir = scratchDir('auto-refresh-review-write-failure');
+    const database = fixtureDatabase();
+    let unregister = () => {};
+    try {
+      const task = buildRefreshTask(threeDueRequests(dir, database));
+      const leftOut = groupIdFor(key('b'));
+      // The write fails, which is not the answer's fault: leaving these groups for later would hide a full or locked disk.
+      unregister = registerSharedFileWriter(dir, (name: string) => { if (name.startsWith('progress/')) throw new Error('the disk is full'); return null; });
+      const laterSteps: string[] = [];
+      let reviewAsks = 0;
+      const error = await task.run(async (prompt: string) => {
+        if (!prompt.includes('Do only section 2')) { laterSteps.push(prompt); return defaultAnswer(prompt); }
+        reviewAsks++;
+        return JSON.stringify({ reviews: showsIn(prompt).filter(show => show.groupId !== leftOut).map(reviewOf) });
+      }, 'claude-code').then(() => null, (caught: unknown) => caught as Error & { answerRefused?: boolean });
+      expect(error?.message).toMatch(/^reviews: .*g_[0-9a-f]{12}: the disk is full/);
+      expect(error?.message).toContain(`${leftOut}: no review was given.`);
+      expect(error?.answerRefused).toBe(true);
+      expect(reviewAsks).toBe(2);
+      expect(laterSteps).toEqual([]);
+      expect(readLedger(dir).progress).toEqual({});
+    } finally { unregister(); database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ['could not be written', 'the disk is full'],
+    ['was refused by the check', 'state must be one of shipped, in-progress, stalled, abandoned, unknown.'],
+  ])('a review that %s is not forgiven when the retry leaves its group out: the refresh still fails and names why', async (fault, why) => {
+    const dir = scratchDir('auto-refresh-review-unsaved-then-left-out');
+    const database = fixtureDatabase();
+    let unregister = () => {};
+    try {
+      const task = buildRefreshTask(threeDueRequests(dir, database));
+      const writeFails = fault === 'could not be written';
+      if (writeFails) unregister = registerSharedFileWriter(dir, (name: string) => { if (name.startsWith('progress/')) throw new Error('the disk is full'); return null; });
+      const laterSteps: string[] = [];
+      let reviewAsks = 0;
+      const error = await task.run(async (prompt: string) => {
+        if (!prompt.includes('Do only section 2')) { laterSteps.push(prompt); return defaultAnswer(prompt); }
+        // Every group gets a review on the first ask, none of them saved; the retry then holds no review at all.
+        return JSON.stringify({ reviews: reviewAsks++ ? [] : showsIn(prompt).map(show => writeFails ? reviewOf(show) : { ...reviewOf(show), state: 'finished' }) });
+      }, 'claude-code').then(() => null, (caught: unknown) => caught as Error & { answerRefused?: boolean });
+      // Left as "no review was given", this would report a full disk as groups the model skipped, on every refresh.
+      expect(error?.message).toMatch(/^reviews: g_[0-9a-f]{12}: no review was given on the retry; the first one was not saved: /);
+      expect(error?.message).toContain(`the first one was not saved: ${why}`);
+      expect(error?.answerRefused).toBe(true);
+      expect(reviewAsks).toBe(2);
+      expect(laterSteps).toEqual([]);
+      expect(readLedger(dir).progress).toEqual({});
+      expect(task.groupsLeftWithoutReview).toBe(0);
+    } finally { unregister(); database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe('grouping repair', () => {
   it('a retry that still joins without linking the anchor saves the linked parts and leaves the open request as it was', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'auto-refresh-grouping-repair-'));
@@ -1282,6 +1506,40 @@ describe('focus proposal repair', () => {
       const focus = readFocus(database, { localDeviceId: '' });
       expect(focus.focusAreas.map(area => area.name)).not.toContain('Other things');
       expect(['a', 'b', 'c', 'd'].map(session => focus.focusAreaIdByAnchor.get(key(session)))).toEqual(['other', 'other', 'other', 'other']);
+    } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a model that leaves the same request out twice completes the refresh: that request goes in Other and the count is reported (#6432)', async () => {
+    const dir = scratchDir('auto-refresh-focus-missing-repair');
+    const database = fixtureDatabase();
+    try {
+      let placeAnswers = 0;
+      const result = await refreshWithFocusAnswers(dir, database, prompt => {
+        if (isOtherPass(prompt)) return everyRequestInOther(prompt);
+        placeAnswers++;
+        const placed = JSON.parse(everyRequestInOther(prompt));
+        return JSON.stringify({ ...placed, placements: placed.placements.filter((placement: { anchor: string }) => placement.anchor !== key('b')) });
+      });
+      expect(placeAnswers).toBe(2);
+      expect(result).toBe('4 requests reviewed, 4 requests placed, 1 requests placed in Other after retry, story written.');
+      const focus = readFocus(database, { localDeviceId: '' });
+      expect(focus.focusAreaIdByAnchor.get(key('b'))).toBe('other');
+      expect(focus.placementsByAnchor.get(key('b'))?.router?.evidence).toBe('Not placed by the model; move it if it belongs elsewhere.');
+    } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a retry that leaves a request out and also names an unknown area still fails: only the omission is repaired', async () => {
+    const dir = scratchDir('auto-refresh-focus-missing-and-bad-area');
+    const database = fixtureDatabase();
+    try {
+      await expect(refreshWithFocusAnswers(dir, database, prompt => {
+        if (isOtherPass(prompt)) return everyRequestInOther(prompt);
+        const placed = JSON.parse(everyRequestInOther(prompt));
+        const kept = placed.placements.filter((placement: { anchor: string }) => placement.anchor !== key('b'))
+          .map((placement: { anchor: string }) => placement.anchor === key('a') ? { ...placement, focusAreaId: 'fa_unknown' } : placement);
+        return JSON.stringify({ ...placed, placements: kept });
+      })).rejects.toThrow(/^focus \(raw answer: /);
+      expect(readFocus(database, { localDeviceId: '' }).focusAreaIdByAnchor.get(key('b'))).toBeUndefined();
     } finally { database.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });

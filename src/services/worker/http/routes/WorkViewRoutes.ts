@@ -49,15 +49,15 @@ export { isReportedReadyForCheck } from '../../../work-view/review-readiness.js'
 import { configuredFocusJudge } from '../../../work-view/focus-judge.mjs';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { captureEvent } from '../../../telemetry/telemetry.js';
+import { ownMemorySynced } from '../../../sync/own-memory-synced.js';
 import { isForeignLoopbackBrowserWrite } from './SettingsRoutes.js';
 import { validateBody } from '../middleware/validateBody.js';
 import type { SetupScan, SetupScanState } from '../../../prompt-import/setup-scan.js';
 import { readHistoryCounts, type HistoryImport } from '../../../setup/history-import.js';
 import { createSetupTelemetry } from '../../../setup/telemetry.js';
 import { createSetupInstallerResumer } from '../../../setup/resume-installer.js';
-import { hasActiveSetupSession, hasProConfiguration, readSetupState, setupStatePath, writeSetupState, type SetupStateFile, type SetupStateView } from '../../../../shared/setup-state.js';
-import { toSetupUsage } from '../../../../shared/setup-usage.js';
-import { historyImportRunning, SETUP_BRANCHES, SETUP_CLOUD_SYNC_OFFERS, SETUP_INSTALLER_STAGES, SETUP_MEMORY_BILLINGS, setupCloudSyncOffer } from '../../../../shared/setup-funnel.js';
+import { hasActiveSetupSession, hasHostedObserver, hasProConfiguration, readSetupState, setupStatePath, writeSetupState, type SetupCheckout, type SetupCheckoutServed, type SetupStateFile, type SetupStateView } from '../../../../shared/setup-state.js';
+import { historyImportRunning, SETUP_BRANCHES, SETUP_CLOUD_SYNC_OFFERS, SETUP_DEVICE_CODE_PATTERN, SETUP_INSTALLER_STAGES, SETUP_MEMORY_BILLINGS, setupCloudSyncOffer } from '../../../../shared/setup-funnel.js';
 import { hasPendingInstallSetup, SETUP_DSH_PROFILE_MAX_CHARACTERS, SETUP_INSTALL_NOTE_MAX_CHARACTERS, SETUP_INSTALL_STATUSES } from '../../../../shared/setup-install.js';
 import {
   CONTINUABLE_PLATFORMS, CONVERSATION_SESSION_UUID_PATTERN, OPEN_IN_APP_CLICK_ID_PATTERN, type ConversationContinuation, type ConversationContinuationNotice,
@@ -109,14 +109,18 @@ export function requireWorkViewOrigin(req: Request, res: Response, next: NextFun
 }
 
 // Reads that return share links or comments: the viewer's own page only. Worker CORS lets other local pages read
-// responses, and a cross-origin fetch carries its Origin.
-export function requireWorkViewReadOrigin(req: Request, res: Response, next: NextFunction): void {
-  if (req.get('sec-fetch-site') === 'cross-site' || isForeignLoopbackBrowserWrite(req)) {
-    res.status(403).json({ error: 'Sharing is available only from the local work viewer.' });
-    return;
-  }
-  next();
+// responses, and a cross-origin fetch carries its Origin. `refusal` words the 403 for what the route serves.
+function workViewReadOrigin(refusal: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.get('sec-fetch-site') === 'cross-site' || isForeignLoopbackBrowserWrite(req)) {
+      res.status(403).json({ error: refusal });
+      return;
+    }
+    next();
+  };
 }
+export const requireWorkViewReadOrigin = workViewReadOrigin('Sharing is available only from the local work viewer.');
+const requireSetupPageReadOrigin = workViewReadOrigin('The device code is available only from the local setup page.');
 
 const ruleBody = z.object({
   action: z.enum(['approve', 'edit', 'turn-off', 'turn-on', 'dismiss', 'add', 'replace', 'restore-suggestion']),
@@ -246,9 +250,13 @@ const suggestionBody = z.object({
 
 // The viewer's page ids (src/ui/my-work/src/live/usage.ts `UsageView`: setup plus App.tsx `View`): a closed list, so a
 // usage report can carry nothing else. A focus area is My Work filtered to that area, so it counts as `work`, never by name.
+// `view_hosted_plans` is the "See plans and pricing" click on Work View's hosted offer, with the Cloud Sync plan setup
+// kept, if any (the same closed values the setup funnel's action carries). It comes after setup, when the installer's
+// setup session (and so the setup event route) is gone, so it is counted here.
 const usageBody = z.discriminatedUnion('event', [
   z.object({ event: z.literal('opened'), view: z.enum(WORK_VIEW_USAGE_VIEWS) }).strict(),
   z.object({ event: z.literal('switched'), view: z.enum(WORK_VIEW_USAGE_VIEWS), previousView: z.enum(WORK_VIEW_USAGE_VIEWS) }).strict(),
+  z.object({ event: z.literal('view_hosted_plans'), cloudSyncOffer: z.enum(SETUP_CLOUD_SYNC_OFFERS).optional() }).strict(),
 ]);
 
 /** The line that makes Claude Code load the approved rules with the owner's user-level instructions.
@@ -359,6 +367,17 @@ function redactSetupInstall(install: SetupStateFile['install']): SetupStateFile[
   return { ...install, selection: email ? { ...selection, emailProvided: true } : selection };
 }
 
+/**
+ * The device code is no page's to read either: typed into someone else's signed-in browser, it would connect this
+ * device to their account. The served state says only that one waits; the setup page reads it from the origin-guarded
+ * GET /api/setup/checkout/device-code.
+ */
+function redactSetupCheckout(checkout: SetupCheckout | null): SetupCheckoutServed | null {
+  if (!checkout) return null;
+  const { deviceCode, ...served } = checkout;
+  return deviceCode && checkout.state === 'waiting' ? { ...served, deviceCodeWaiting: true } : served;
+}
+
 // Cloud Sync can use the existing provider. An explicit offer never changes a local or legacy hosted choice.
 const setupChoiceBody = z.object({
   branch: z.enum(SETUP_BRANCHES),
@@ -378,7 +397,15 @@ const setupInstallerBody = z.object({
   error: z.string().max(2000).nullable().optional(),
   /** The installer mirrors the pairing checkout it is running (funnel Phase 8). */
   checkout: z.enum(['waiting', 'paid', 'failed']).optional(),
-}).strict();
+  /** The pairing's code, sent with `waiting` so the setup page can show it; paid and failed clear it. */
+  deviceCode: z.object({
+    userCode: z.string().regex(SETUP_DEVICE_CODE_PATTERN),
+    // The installer sends Date#toISOString(); nothing else is a time this field takes.
+    expiresAt: z.string().max(40).refine(value => !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value).nullable(),
+  }).strict().optional(),
+}).strict().refine(body => !body.deviceCode || body.checkout === 'waiting', {
+  message: 'A device code is reported only while checkout waits.',
+});
 const setupCheckoutBody = z.object({}).strict();
 const setupResumeBody = z.object({ retry: z.boolean().optional() }).strict();
 const setupCompleteBody = z.object({
@@ -484,7 +511,7 @@ export function defaultAutoRefresh(ledgerDir: string, settingsPath = USER_SETTIN
       const setup = reason === 'setup-scan';
       const task = buildRefreshTask({ needs, reason, dataDir: DATA_DIR, ledgerDir, pluginRoot: getPackageRoot(), openDatabase, localDeviceId, saveFocus,
         judge: setup ? null : configuredJudge(settingsPath), focusJudge: setup ? null : configuredFocusJudge(settingsPath) });
-      return { ...(await runAgentTask(task)), steps: task.steps };
+      return { ...(await runAgentTask(task)), steps: task.steps, groupsLeftWithoutReview: task.groupsLeftWithoutReview };
     },
     // Jev labels open work-state items on every check; read from settings each time, like the judges.
     labelWorkState: async () => {
@@ -955,6 +982,13 @@ export class WorkViewRoutes extends BaseRouteHandler {
     }));
     app.post('/api/setup/installer', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(setupInstallerBody), this.wrapHandler(this.saveInstallerStage));
     app.post('/api/setup/checkout', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(setupCheckoutBody), this.wrapHandler(this.requestCheckout));
+    // The code shown beside "Waiting for this device to connect…": the setup page's own origin only (redactSetupCheckout).
+    app.get('/api/setup/checkout/device-code', workViewLoopbackOnly, requireSetupPageReadOrigin, this.wrapHandler((_req, res) => {
+      const checkout = readSetupState(this.setupStatePath).checkout;
+      res.setHeader('Cache-Control', 'no-store');
+      if (checkout?.state !== 'waiting' || !checkout.deviceCode) { res.status(404).json({ error: 'No device code is waiting.' }); return; }
+      res.json(checkout.deviceCode);
+    }));
     app.post('/api/setup/import', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(setupImportBody), this.wrapHandler(this.startHistoryImport));
     // Finish Setup's "Stop import": the same guards. It only ends a run; the person's own POST above starts one again.
     app.post('/api/setup/import/stop', workViewLoopbackOnly, requireWorkViewOrigin, validateBody(setupImportBody), this.wrapHandler(this.stopHistoryImport));
@@ -964,7 +998,8 @@ export class WorkViewRoutes extends BaseRouteHandler {
   private setupStateView(state: SetupStateFile = readSetupState(this.setupStatePath)): SetupStateView {
     const settings = SettingsDefaultsManager.loadFromFile(this.settingsPath, true, { readOnly: true }) as unknown as Record<string, unknown>;
     const historyImport = this.historyImport?.state() ?? null;
-    return { ...state, install: redactSetupInstall(state.install), alreadyPro: hasProConfiguration(settings), history: this.historyCounts(), historyImport, backgroundWorkRunning: this.backgroundWorkRunning({ countScanWaitingForUploadAnswer: true, failOnUnreadableRefresh: false }) };
+    const { history, memorySynced } = this.localMemoryFacts();
+    return { ...state, install: redactSetupInstall(state.install), checkout: redactSetupCheckout(state.checkout), alreadyPro: hasProConfiguration(settings), hostedObserver: hasHostedObserver(settings), history, memorySynced, historyImport, backgroundWorkRunning: this.backgroundWorkRunning({ countScanWaitingForUploadAnswer: true, failOnUnreadableRefresh: false }) };
   }
 
   /**
@@ -1008,11 +1043,13 @@ export class WorkViewRoutes extends BaseRouteHandler {
     return this.humanCopy?.status().generating ?? 0;
   }
 
-  /** This machine's own observations, for the import offer. A missing database is a new install: nothing to import. */
-  private historyCounts(): { projects: number; sessions: number; observations: number } | null {
-    if (!existsSync(this.databasePath)) return { projects: 0, sessions: 0, observations: 0 };
+  /** This machine's own observations (Finish Setup's import offer) and whether the sync hub has ever acknowledged one of
+   * its memories (Work View's hosted offer, ownMemorySynced), from one read-only open of the database. A missing
+   * database is a new install: nothing to import, nothing synced. */
+  private localMemoryFacts(): { history: { projects: number; sessions: number; observations: number } | null; memorySynced: boolean } {
+    if (!existsSync(this.databasePath)) return { history: { projects: 0, sessions: 0, observations: 0 }, memorySynced: false };
     const database = new Database(this.databasePath, { readonly: true, create: false });
-    try { return readHistoryCounts(database); }
+    try { return { history: readHistoryCounts(database), memorySynced: ownMemorySynced(database) }; }
     finally { database.close(); }
   }
 
@@ -1129,25 +1166,24 @@ export class WorkViewRoutes extends BaseRouteHandler {
       checkout = { state: 'requested', requests: 1, error: null, updatedAt: now };
     }
     if (locked && checkout === state.checkout) { res.setHeader('Cache-Control', 'no-store'); res.json(this.setupStateView(state)); return; }
-    const scanUsage = offer && !state.choice?.usage ? this.setupScan?.state().usage : null;
-    const usage = state.choice?.usage ?? (scanUsage ? toSetupUsage(scanUsage) : undefined);
     const choice = locked ? state.choice : {
       branch, memoryBilling, chosenAt: now,
       ...(shareWorkView ? { shareWorkView } : {}),
-      ...(offer ? { cloudSyncOffer: offer, ...(usage ? { usage } : {}) } : {}),
+      ...(offer ? { cloudSyncOffer: offer } : {}),
     };
     this.saveSetupState({ ...state, choice, checkout }, res);
   };
 
   private saveInstallerStage = (req: Request, res: Response): void => {
-    const { stage, error, checkout } = req.body as z.infer<typeof setupInstallerBody>;
+    const { stage, error, checkout, deviceCode } = req.body as z.infer<typeof setupInstallerBody>;
     const state = readSetupState(this.setupStatePath);
     const now = new Date().toISOString();
     // A new installer run starts a fresh hand-off: a choice or checkout left by an earlier, interrupted run is not applied.
     const fresh = stage === 'waiting-for-choice';
     const choice = fresh ? null : state.choice;
     const checkoutState = fresh ? null : checkout
-      ? { state: checkout, requests: state.checkout?.requests ?? 0, error: checkout === 'failed' ? error ?? null : null, updatedAt: now }
+      // Each report replaces the code: only a waiting checkout carries one (the body check), so paid and failed clear it.
+      ? { state: checkout, requests: state.checkout?.requests ?? 0, error: checkout === 'failed' ? error ?? null : null, updatedAt: now, ...(deviceCode ? { deviceCode } : {}) }
       : state.checkout;
     this.saveSetupState({ ...state, choice, checkout: checkoutState, installer: { stage, error: checkout ? state.installer?.error ?? null : error ?? null, updatedAt: now } }, res);
   };
@@ -1620,8 +1656,9 @@ export class WorkViewRoutes extends BaseRouteHandler {
    * finished before the SubagentStop hook existed). Saved like a hook stop, with
    * its own source, so a later tool call from the agent still reopens it.
    */
-  /** Counts the viewer opening on a page, or switching page, through the worker's own consent-gated, whitelist-scrubbed
-   * telemetry (telemetry.ts), so the page loads no analytics SDK. The report names the page only — never what it showed. */
+  /** Counts the viewer opening on a page, switching page, or opening the hosted offer's plans, through the worker's own
+   * consent-gated, whitelist-scrubbed telemetry (telemetry.ts), so the page loads no analytics SDK. The report names the
+   * page (or the plan setup kept) only — never what it showed. */
   private viewerHostname(req: Request): string {
     const host = (req.hostname || '').trim().toLowerCase();
     return /^[a-z0-9.-]{1,253}$/.test(host) ? host : 'unknown';
@@ -1631,7 +1668,8 @@ export class WorkViewRoutes extends BaseRouteHandler {
     const report = req.body as z.infer<typeof usageBody>;
     const where = { viewer_host: 'local', hostname: this.viewerHostname(req) };
     if (report.event === 'opened') captureEvent('work_view_opened', { view: report.view, ...where });
-    else captureEvent('work_view_switched', { view: report.view, previous_view: report.previousView, ...where });
+    else if (report.event === 'switched') captureEvent('work_view_switched', { view: report.view, previous_view: report.previousView, ...where });
+    else captureEvent('work_view_hosted_plans_viewed', { ...(report.cloudSyncOffer ? { cloud_sync_offer: report.cloudSyncOffer } : {}), ...where });
     res.status(204).end();
   };
 
